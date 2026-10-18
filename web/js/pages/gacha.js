@@ -212,6 +212,21 @@ function baseFromText() {
   setBase(entries.map((e) => [e.w0 ?? 1, e.tag]));
 }
 
+// Back to the empty card (pick from the list or paste a prompt); the toast can put it back.
+function clearBase() {
+  const before = { base: data.base, thumb: baseThumb };
+  data.base = null;
+  baseThumb = null;
+  persist();
+  render();
+  toast('기준 그림체를 지웠습니다. 새로 고르거나 프롬프트를 붙여 넣을 수 있습니다.', 'ok', 5000, { label: '되돌리기', onclick: () => {
+    data.base = before.base;
+    baseThumb = before.thumb;
+    persist();
+    render();
+  } });
+}
+
 function toggleLock(tag) {
   const locked = new Set(data.base.locked || []);
   locked.has(tag) ? locked.delete(tag) : locked.add(tag);
@@ -361,6 +376,7 @@ function baseCard() {
         h('button', { class: 'btn sm', onclick: pickBase }, icon('grid'), '그림체에서 다시 고르기'),
         h('button', { class: 'btn ghost sm', onclick: () => copyText(mixText(base.pairs, cfg()), '기준 그림체를 복사했습니다.') }, icon('copy'), '복사'),
         locked.size ? h('button', { class: 'btn ghost sm', onclick: () => { data.base.locked = []; persist(); render(); } }, '고정 모두 풀기') : null,
+        h('button', { class: 'btn ghost sm danger-text', onclick: clearBase }, icon('trash'), '기준 지우기'),
         h('span', { class: 'spacer' }),
         h('span', { class: 'note' }, `작가 ${base.pairs.length}명 · 고정 ${locked.size}`)),
     ] : h('div', { class: 'stack', style: { gap: '10px' } },
