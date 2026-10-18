@@ -58,6 +58,8 @@ function fighter(combo, side, rival, kind) {
   const frame = art(combo, { thumb: false, corners: [
     ['tl', masked || kind === 'select' || !combo.role ? null : h('span', { class: 'badge glass' }, combo.role)],
     ['tr', h('span', { class: 'badge glass side-mark' }, side === 'a' ? 'A' : 'B')],
+    ['br', deletable(kind) ? h('button', { class: 'btn glass sm reject-btn', 'aria-label': `${side === 'a' ? 'A' : 'B'} 쳐내기`,
+      onclick: (e) => { e.stopPropagation(); reject(side); } }, icon('ban'), '쳐내기') : null],
   ] });
   listen(frame, 'click', (event) => {
     if (event.currentTarget.__panned || !combo.image) return;
@@ -84,7 +86,7 @@ function fighter(combo, side, rival, kind) {
             h('div', { class: 'meta' }, `${evaluating(combo) && !settled(combo, after) ? '새 조합' : record(after || combo)} · ${capped(combo.generation)}세대`)),
       h('div', { class: 'fighter-actions' },
         h('button', { class: 'btn ghost sm labeled', onclick: () => openOriginal(combo) }, icon('share'), '공유'),
-        deletable(kind) ? h('button', { class: 'btn ghost sm labeled danger-text', onclick: () => remove([combo.id]) }, icon('trash'), '삭제') : null)),
+        deletable(kind) ? h('button', { class: 'btn ghost sm labeled danger-text', onclick: () => reject(side) }, icon('ban'), '쳐내기') : null)),
     h('div', { class: 'fighter-tags' }, tags,
       h('button', { class: 'btn ghost sm labeled', 'aria-label': '복사', onclick: () => copyText(combo.style) }, icon('copy'), h('span', { class: 'hide-xs' }, '복사'))),
     h('button', { class: 'btn primary pick', disabled: !ready, onclick: () => vote(side) },
@@ -168,6 +170,7 @@ async function act(path, body, side) {
     }
     render(match);
     app.refresh();
+    return match;
   } catch (error) {
     toast(error.message, 'error');
     await load();
@@ -179,6 +182,12 @@ async function act(path, body, side) {
 const vote = (side) => current?.kind && ready && act('/api/vote', { side }, side);
 const skip = () => current?.kind && ready && act('/api/skip', undefined, 'even');
 const undo = () => act('/api/undo');
+// 쳐내기: this side loses the match (counted in Elo, record and artist 승률) and leaves the arena as 쳐냄 (그림체 keeps it).
+async function reject(side) {
+  if (!current?.kind || busy || !deletable(current.kind)) return;
+  const label = side === 'a' ? 'A' : 'B';
+  if (await act('/api/reject', { side }, side === 'a' ? 'b' : 'a')) toast(`${label}를 쳐냈습니다. 패배로 기록되고 그림체 목록에 '쳐냄'으로 남습니다.`, 'ok', 5000, { label: '되돌리기', onclick: undo });
+}
 async function remove(ids) {
   if (busy) return;
   busy = true;
@@ -246,6 +255,8 @@ function openCompare(side = 'a') {
         h('div', { class: 'segmented' }, ['a', 'b'].map((s) => h('button', { class: showing === s ? 'on' : '', onclick: () => flip(s) }, s === 'a' ? 'A' : 'B'))),
         h('span', { class: 'compare-info' }, info),
         h('span', { class: 'spacer' }),
+        deletable(m.kind) ? h('button', { class: 'btn ghost sm danger-text', 'aria-label': `${showing === 'a' ? 'A' : 'B'} 쳐내기`, onclick: () => reject(showing) },
+          icon('ban'), `${showing === 'a' ? 'A' : 'B'} 쳐내기`) : null,
         h('button', { class: 'btn ghost icon-btn', 'aria-label': '되돌리기', disabled: !m.undo, onclick: undo }, icon('undo'))),
       h('div', { class: 'compare-stage', key: `stage-${stamp}` },
         ['a', 'b'].map((s) => h('img', { class: `side-${s} ${showing === s ? 'on' : ''}`, src: m[s].image, alt: '', draggable: false })),

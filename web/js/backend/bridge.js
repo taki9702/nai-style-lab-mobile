@@ -85,6 +85,7 @@ export async function createBridge() {
 
   const post = {
     '/api/vote': (b) => e.vote(b.side),
+    '/api/reject': (b) => e.reject(b.side),
     '/api/skip': () => e.skip(),
     '/api/undo': () => e.undo(),
     '/api/settings': (b) => e.updateSettings(b.changes || {}),

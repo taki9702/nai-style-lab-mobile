@@ -673,6 +673,9 @@ export function placementState(votes, ladderSize) {
   return [best[Math.floor((best.length - 1) / 2)], null];
 }
 
+// The lowest slot a newcomer's placement votes still allow (쳐내기: a rejected newcomer is put there).
+export const placementLowSlot = (votes, ladderSize) => bisect(votes, ladderSize, false)[0];
+
 export function placementElo(slot, scores) {
   if (!scores.length) return START_ELO;
   if (slot <= 0) return pyRound(scores[0] - PLACE_GAP);

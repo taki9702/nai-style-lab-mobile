@@ -2,8 +2,9 @@
 // pinned artists go into every mix (their weight random or fixed, their place free or first/last). Results copy
 // straight into NovelAI, or go to the arena as new combos to be ranked.
 import { get, post } from '../api.js';
-import { h, morph, icon, toast, copyText, pageHead, card, emptyState, confirmDialog, shortTag, pickFile, novelaiMeta, stealthMeta, fmt } from '../ui.js';
-import { DEFAULT_CONFIG, parsePool, drawBatch, validate, mixText } from '../backend/gacha.js';
+import { h, morph, icon, toast, copyText, pageHead, card, emptyState, confirmDialog, shortTag, pickFile, novelaiMeta, stealthMeta, fmt,
+  modal, comboTile, galleryList } from '../ui.js';
+import { DEFAULT_CONFIG, parsePool, drawBatch, validate, mixText, drawVariantBatch, validateVariant } from '../backend/gacha.js';
 import { FAVOR_LEVELS, artistPreference } from '../backend/core.js';
 
 const HISTORY_LIMIT = 200;
@@ -13,10 +14,12 @@ const POSITIONS = [['any', '자리 자유'], ['first', '맨 앞'], ['last', '맨
 const TAP_MODES = [['pin', '고정'], ['off', '제외'], ['delete', '삭제']];
 
 let root, app;
-let data = { pool: [], config: { ...DEFAULT_CONFIG }, favorites: [], history: [] };
+let data = { pool: [], config: { ...DEFAULT_CONFIG }, favorites: [], history: [], base: null };
+let baseThumb = null;  // the picture of the 기준 그림체 when it is one of the combos
 let results = [];  // the latest draws (saved too, so they are still there after the app restarts)
 let selected = new Set();
-const view = { input: '', tap: 'pin', tab: 'results', poolOpen: true, rulesOpen: true };
+const view = { input: '', tap: 'pin', tab: 'results', poolOpen: true, rulesOpen: true, baseInput: '' };
+const baseMode = () => cfg().mode === 'base';
 let saveTimer = null;
 
 function persist() {
@@ -115,21 +118,29 @@ async function preference() {
   const boost = Number(cfg().favor) || 1;
   if (!(boost > 1)) return null;
   const scores = await loadScores();
-  const free = data.pool.filter((a) => (a.state || 'free') === 'free').map((a) => a.tag);
+  const free = data.pool.filter((a) => (baseMode() ? a.state !== 'off' : (a.state || 'free') === 'free')).map((a) => a.tag);
   return artistPreference(scores, free, boost);
 }
 
+// One batch the way the mode says: new mixes from the pool, or variations of the 기준 그림체.
+async function drawSome(count, avoid) {
+  if (!baseMode()) return drawBatch(data.pool, cfg(), count, avoid, await preference());
+  const base = data.base;
+  const from = base.pairs;
+  return drawVariantBatch(base, data.pool, cfg(), count, avoid, await preference()).map((r) => ({ ...r, from }));
+}
+
 async function draw() {
-  const problem = validate(data.pool, cfg());
+  const problem = baseMode() ? validateVariant(data.base, data.pool, cfg()) : validate(data.pool, cfg());
   if (problem) return toast(problem, 'warn');
   const count = Math.max(1, Math.min(50, Math.trunc(Number(cfg().batch) || 1)));
   const avoid = new Set([...data.history.map((r) => r.key), ...results.map((r) => r.key)]);
-  const batch = drawBatch(data.pool, cfg(), count, avoid, await preference());
+  const batch = await drawSome(count, avoid);
   if (!batch.length) return toast('더 이상 새로운 조합을 만들 수 없습니다. 작가를 더 넣거나 범위를 넓혀 주세요.', 'warn');
   const at = Date.now();
   const made = batch.map((r, i) => ({ ...r, id: `${at.toString(36)}${i}`, time: at }));
   results = [...made, ...results].slice(0, RESULTS_LIMIT);
-  data.history = [...made.map(({ id, key, text, style, pairs, time }) => ({ id, key, text, style, pairs, time })), ...data.history].slice(0, HISTORY_LIMIT);
+  data.history = [...made.map(({ id, key, text, style, pairs, time, from }) => ({ id, key, text, style, pairs, time, from })), ...data.history].slice(0, HISTORY_LIMIT);
   persist();
   view.tab = 'results';
   if (batch.length < count) toast(`새 조합은 ${batch.length}개까지만 만들 수 있었습니다.`, 'info');
@@ -147,7 +158,8 @@ function scrollToResults() {
 
 async function reroll(r) {
   const avoid = new Set([...data.history.map((x) => x.key), ...results.map((x) => x.key)]);
-  const [fresh] = drawBatch(data.pool, cfg(), 1, avoid, await preference());
+  if (baseMode() && validateVariant(data.base, data.pool, cfg())) return toast(validateVariant(data.base, data.pool, cfg()), 'warn');
+  const [fresh] = await drawSome(1, avoid);
   if (!fresh) return toast('더 이상 새로운 조합을 만들 수 없습니다.', 'warn');
   const next = { ...fresh, id: `${Date.now().toString(36)}r`, time: Date.now() };
   results = results.map((x) => (x.id === r.id ? next : x));
@@ -162,7 +174,48 @@ const isFav = (r) => data.favorites.some((f) => f.key === r.key);
 
 function toggleFav(r) {
   if (isFav(r)) data.favorites = data.favorites.filter((f) => f.key !== r.key);
-  else data.favorites.unshift({ id: r.id, key: r.key, text: r.text, style: r.style, pairs: r.pairs, time: Date.now() });
+  else data.favorites.unshift({ id: r.id, key: r.key, text: r.text, style: r.style, pairs: r.pairs, from: r.from, time: Date.now() });
+  persist();
+  render();
+}
+
+// ---------------------------------------------------------------- 기준 그림체
+function setBase(pairs, extra = {}) {
+  data.base = { pairs: pairs.map(([w, t]) => [Number(w), t]), locked: [], ...extra };
+  baseThumb = extra.thumb || null;
+  cfg().mode = 'base';
+  persist();
+  render();
+  toast(`기준 그림체를 정했습니다 (작가 ${pairs.length}명). 뽑기를 누르면 이 틀에서 변형을 뽑습니다.`, 'ok');
+}
+
+async function pickBase() {
+  let list = [];
+  try {
+    const d = await get('/api/combos');
+    list = galleryList(d.active, [], { tiers: new Set(), sort: 'elo-desc' });
+  } catch (error) { return toast(error.message, 'error'); }
+  const chosen = await modal((dialog, done) => {
+    dialog.classList.add('picker-dialog');
+    dialog.append(h('h3', {}, '기준 그림체 고르기'), h('p', {}, '고른 그림체의 작가와 가중치를 틀로 써서 변형을 뽑습니다. Elo 높은 순입니다.'),
+      list.length ? h('div', { class: 'gallery picker-grid' }, list.map((c) => comboTile(c, { onclick: () => done(c) })))
+        : emptyState({ iconName: 'grid', title: '그림체가 없습니다', text: '먼저 조합을 만들어 대결에서 순위를 정해 주세요.' }),
+      h('div', { class: 'actions' }, h('button', { class: 'btn ghost', onclick: () => done(null) }, '취소')));
+  });
+  if (chosen) setBase(chosen.pairs.map((p) => [p.w, p.tag]), { id: chosen.id, thumb: chosen.thumb });
+}
+
+function baseFromText() {
+  const entries = parsePool(view.baseInput);
+  if (!entries.length) return toast('작가 태그를 찾지 못했습니다. 1.2::artist:이름 :: 형식으로 붙여 넣어 주세요.', 'warn');
+  view.baseInput = '';
+  setBase(entries.map((e) => [e.w0 ?? 1, e.tag]));
+}
+
+function toggleLock(tag) {
+  const locked = new Set(data.base.locked || []);
+  locked.has(tag) ? locked.delete(tag) : locked.add(tag);
+  data.base.locked = [...locked];
   persist();
   render();
 }
@@ -249,7 +302,9 @@ function chip(a) {
 
 function poolCard() {
   const c = counts();
-  return card({ icon: 'users', title: `작가 풀 ${fmt(data.pool.length)}명`, desc: '뽑기에 쓸 작가들입니다. 칩을 누르면 아래에서 고른 동작(고정 · 제외 · 삭제)을 합니다.', cls: 'gacha-pool' },
+  return card({ icon: 'users', title: `작가 풀 ${fmt(data.pool.length)}명`, cls: 'gacha-pool',
+    desc: baseMode() ? '바꿔치기 · 추가할 작가를 여기서 고릅니다. 제외한 작가는 쓰지 않습니다 (기준 그림체에 이미 있는 작가도 빼고 고릅니다).'
+      : '뽑기에 쓸 작가들입니다. 칩을 누르면 아래에서 고른 동작(고정 · 제외 · 삭제)을 합니다.' },
     h('textarea', { class: 'textarea grow', rows: 3, value: view.input, oninput: (e) => { view.input = e.currentTarget.value; },
       placeholder: '1.2::artist:rurudo ::, artist:shigure ui ...\n프롬프트를 붙여 넣으면 artist: 태그만, 이름만 쉼표로 적으면 그 이름들을 넣습니다' }),
     h('div', { class: 'row wrap', style: { marginTop: '10px', gap: '6px' } },
@@ -286,7 +341,88 @@ function pinnedCard() {
         h('button', { class: 'btn ghost icon-btn sm', 'aria-label': '고정 풀기', onclick: () => { a.state = 'free'; persist(); render(); } }, icon('x')))))));
 }
 
+function modeBar() {
+  return h('div', { class: 'segmented gacha-mode' },
+    [['pool', '작가 풀에서 새로 뽑기'], ['base', '기준 그림체로 뽑기']].map(([mode, label]) =>
+      h('button', { class: cfg().mode === mode ? 'on' : '', onclick: () => { cfg().mode = mode; persist(); render(); } }, label)));
+}
+
+function baseCard() {
+  const base = data.base;
+  const d = cfg().step < 0.1 ? 2 : 1;
+  const locked = new Set(base?.locked || []);
+  return card({ icon: 'target', tone: 'rose', title: '기준 그림체', desc: '마음에 든 그림체 하나를 틀로 정하고, 그 안에서 작가를 바꿔치기 · 추가 · 빼기하고 가중치를 흔듭니다. 작가 칩을 누르면 고정(그대로 둠)됩니다.', cls: 'gacha-base' },
+    base ? [
+      h('div', { class: 'base-row' },
+        baseThumb ? h('img', { class: 'base-thumb', src: baseThumb, alt: '' }) : null,
+        h('div', { class: 'gchips' }, base.pairs.map(([w, t]) => h('button', { class: `gchip ${locked.has(t) ? 'pin' : 'free'}`, key: t, onclick: () => toggleLock(t) },
+          locked.has(t) ? icon('pin') : null, h('span', { class: 'name' }, shortTag(t)), h('span', { class: 'w' }, Number(w).toFixed(d)))))),
+      h('div', { class: 'row wrap', style: { marginTop: '10px', gap: '6px' } },
+        h('button', { class: 'btn sm', onclick: pickBase }, icon('grid'), '그림체에서 다시 고르기'),
+        h('button', { class: 'btn ghost sm', onclick: () => copyText(mixText(base.pairs, cfg()), '기준 그림체를 복사했습니다.') }, icon('copy'), '복사'),
+        locked.size ? h('button', { class: 'btn ghost sm', onclick: () => { data.base.locked = []; persist(); render(); } }, '고정 모두 풀기') : null,
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'note' }, `작가 ${base.pairs.length}명 · 고정 ${locked.size}`)),
+    ] : h('div', { class: 'stack', style: { gap: '10px' } },
+      h('button', { class: 'btn primary', onclick: pickBase }, icon('grid'), '그림체 목록에서 고르기'),
+      h('textarea', { class: 'textarea', rows: 2, value: view.baseInput, oninput: (e) => { view.baseInput = e.currentTarget.value; },
+        placeholder: '또는 쓰던 프롬프트를 붙여 넣기\n1.2::artist:rurudo ::, 0.9::artist:shigure ui ::' }),
+      h('button', { class: 'btn', onclick: baseFromText }, icon('plus'), '붙여 넣은 프롬프트를 기준으로')));
+}
+
+function variantCard() {
+  const c = cfg();
+  const rangeRule = (label, a, b, note) => h('div', { class: 'rule' }, h('div', { class: 'note' }, label),
+    h('div', { class: 'range-pair' }, num(a, { min: 0, max: 20 }), h('span', {}, '~'), num(b, { min: 0, max: 20 })),
+    note ? h('div', { class: 'note', style: { marginTop: '4px' } }, note) : null);
+  return card({ icon: 'sliders', tone: 'sky', title: '변형 규칙', desc: '한 번 뽑을 때마다 아래 범위 안에서 무작위로 정합니다. 고정한 작가는 건드리지 않습니다.' },
+    h('div', { class: 'rule-grid' },
+      rangeRule('바꿔치기 (명)', 'vSwapMin', 'vSwapMax', '기준 작가를 풀의 다른 작가로'),
+      rangeRule('추가 (명)', 'vAddMin', 'vAddMax', '풀에서 새 작가를 더 넣기'),
+      rangeRule('빼기 (명)', 'vDropMin', 'vDropMax', '기준 작가 줄이기'),
+      h('div', { class: 'rule' }, h('div', { class: 'note' }, '가중치 흔들기 (±)'),
+        select('vJitter', [[0, '안 바꿈'], [0.1, '±0.1'], [0.2, '±0.2'], [0.3, '±0.3'], [0.5, '±0.5']]),
+        h('div', { class: 'note', style: { marginTop: '4px' } }, '남긴 기준 작가의 가중치')),
+      h('div', { class: 'rule' }, h('div', { class: 'note' }, '바꿔 넣은 작가 가중치'),
+        select('vSwapWeight', [['keep', '원래 자리 가중치'], ['random', '가중치 범위에서 랜덤']])),
+      h('div', { class: 'rule' }, h('div', { class: 'note' }, '순서'), select('vOrder', [['keep', '기준 순서 유지'], ['shuffle', '무작위 섞기']]))));
+}
+
 function rulesCard() {
+  if (baseMode()) return baseRulesCard();
+  return poolRulesCard();
+}
+
+// Base mode keeps what still applies: the weight range (for the artists put in), the output options and 선호 작가 반영.
+function baseRulesCard() {
+  const c = cfg();
+  return card({ icon: 'sliders', title: '출력 · 가중치', desc: '새로 넣는 작가의 가중치 범위와 출력 형식입니다.' },
+    h('div', { class: 'rule-grid' },
+      h('div', { class: 'rule' }, h('div', { class: 'note' }, '새로 넣는 작가 가중치'),
+        h('div', { class: 'range-pair' }, num('wMin', { step: 0.05, min: 0.05, max: 5 }), h('span', {}, '~'), num('wMax', { step: 0.05, min: 0.05, max: 5 }))),
+      h('div', { class: 'rule' }, h('div', { class: 'note' }, '가중치 단위'), select('step', [[0.1, '0.1 단위'], [0.05, '0.05 단위']])),
+      favorRule(c)),
+    h('div', { class: 'stack', style: { gap: '10px', marginTop: '12px' } },
+      toggle('unique', '이미 뽑은 조합은 다시 뽑지 않기'),
+      toggle('space', '닫는 :: 앞에 공백 넣기 (1.2::artist:x ::)'),
+      toggle('omitOne', '가중치 1.0인 작가는 태그만 쓰기')),
+    h('div', { class: 'rule-grid', style: { marginTop: '12px' } }, templateRule(c)));
+}
+
+function favorRule(c) {
+  return h('div', { class: 'rule wide' }, h('div', { class: 'note' }, '선호 작가 반영'), select('favor', FAVOR_LEVELS),
+    h('div', { class: 'note', style: { marginTop: '4px' } }, Number(c.favor) > 1
+      ? `대결 점수가 높은 작가가 더 자주 뽑힙니다 (1위 ×${c.favor}, 꼴찌 ×${Math.round(100 / c.favor) / 100}, 점수 없는 작가 ×1).${baseMode() ? ' 바꿔치기 · 추가할 작가를 고를 때 씁니다.' : ' 고정 작가는 상관없이 항상 들어갑니다.'}`
+      : '끄면 후보 작가가 모두 같은 확률로 뽑힙니다.'));
+}
+
+function templateRule(c) {
+  return h('div', { class: 'rule wide' }, h('div', { class: 'note' }, '출력 틀 ({artist} 자리에 작가 믹스)'),
+    h('textarea', { class: 'textarea', rows: 2, value: c.template, style: { minHeight: '56px' },
+      onchange: (e) => { c.template = e.currentTarget.value; persist(); render(); } }));
+}
+
+function poolRulesCard() {
   const c = cfg();
   const pins = counts().pin;
   return card({ icon: 'sliders', tone: 'sky', title: '뽑기 규칙', desc: '작가 수, 가중치, 순서를 정합니다. NAI V5 가중치 문법(1.2::태그 ::)으로 출력합니다.' },
@@ -307,13 +443,8 @@ function rulesCard() {
     h('div', { class: 'rule-grid', style: { marginTop: '12px' } },
       h('div', { class: 'rule' }, h('div', { class: 'note' }, '전체 가중치 배율'), num('scale', { step: 0.05, min: 0.05, max: 5, width: '100%' }),
         h('div', { class: 'note', style: { marginTop: '4px' } }, '뽑은 뒤 모든 가중치에 곱합니다 (예: 0.7).')),
-      h('div', { class: 'rule wide' }, h('div', { class: 'note' }, '선호 작가 반영'), select('favor', FAVOR_LEVELS),
-        h('div', { class: 'note', style: { marginTop: '4px' } }, Number(c.favor) > 1
-          ? `대결 점수가 높은 작가가 더 자주 뽑힙니다 (1위 ×${c.favor}, 꼴찌 ×${Math.round(100 / c.favor) / 100}, 점수 없는 작가 ×1). 고정 작가는 상관없이 항상 들어갑니다.`
-          : '끄면 후보 작가가 모두 같은 확률로 뽑힙니다.')),
-      h('div', { class: 'rule wide' }, h('div', { class: 'note' }, '출력 틀 ({artist} 자리에 작가 믹스)'),
-        h('textarea', { class: 'textarea', rows: 2, value: c.template, style: { minHeight: '56px' },
-          onchange: (e) => { c.template = e.currentTarget.value; persist(); render(); } }))));
+      favorRule(c),
+      templateRule(c)));
 }
 
 function drawBar() {
@@ -327,13 +458,25 @@ function resultCard(r, { fav = false } = {}) {
   const on = selected.has(r.id);
   return h('div', { class: `gresult ${on ? 'selected' : ''}`, key: r.id },
     h('div', { class: 'gresult-text mono', onclick: () => copyText(text, '프롬프트를 복사했습니다.') }, text),
-    h('div', { class: 'tags open' }, r.pairs.map(([w, t]) => h('span', { class: 'tag' },
-      h('span', { class: `w ${w >= 1.3 ? 'hi' : w <= 0.8 ? 'lo' : ''}` }, w.toFixed(cfg().step < 0.1 ? 2 : 1)), shortTag(t)))),
+    h('div', { class: 'tags open' }, r.pairs.map(([w, t]) => {
+      const was = r.from ? new Map(r.from.map(([bw, bt]) => [bt, bw])) : null;
+      const fresh = was && !was.has(t);
+      const moved = was && was.has(t) && Math.abs(was.get(t) - w) > 1e-9;
+      return h('span', { class: `tag ${fresh || moved ? 'diff' : ''}` },
+        h('span', { class: `w ${w >= 1.3 ? 'hi' : w <= 0.8 ? 'lo' : ''}` }, w.toFixed(cfg().step < 0.1 ? 2 : 1)), shortTag(t),
+        fresh ? h('span', { class: 'arrow up' }, '새') : moved ? h('span', { class: `arrow ${w > was.get(t) ? 'up' : 'down'}` }, w > was.get(t) ? '↑' : '↓') : null);
+    })),
+    r.from ? (() => {
+      const now = new Set(r.pairs.map(([, t]) => t));
+      const gone = r.from.filter(([, t]) => !now.has(t)).map(([, t]) => shortTag(t));
+      return gone.length ? h('div', { class: 'note gresult-gone' }, `빠짐: ${gone.join(', ')}`) : null;
+    })() : null,
     h('div', { class: 'gresult-actions' },
       h('button', { class: `tile-check ${on ? 'on' : ''}`, 'aria-label': '선택', onclick: () => { on ? selected.delete(r.id) : selected.add(r.id); render(); } }, icon('check', 'width="14" height="14"')),
       h('button', { class: 'btn primary sm', onclick: () => copyText(text, '프롬프트를 복사했습니다.') }, icon('copy'), '복사'),
       h('button', { class: `btn sm ${isFav(r) ? 'fav-on' : ''}`, 'aria-label': '즐겨찾기', onclick: () => toggleFav(r) }, icon('star')),
       fav ? null : h('button', { class: 'btn sm', 'aria-label': '다시 뽑기', onclick: () => reroll(r) }, icon('refresh')),
+      h('button', { class: 'btn sm', 'aria-label': '이 조합을 기준으로', title: '이 조합을 기준 그림체로', onclick: () => setBase(r.pairs) }, icon('target')),
       h('button', { class: 'btn sm danger-text', 'aria-label': view.tab === 'favorites' ? '즐겨찾기에서 빼기' : '삭제', onclick: () => deleteOne(r) }, icon('trash')),
       h('span', { class: 'spacer' }),
       h('button', { class: 'btn sm', onclick: () => drawImages([r]) }, icon('brush'), '그리기')));
@@ -372,7 +515,8 @@ function render() {
   morph(root,
     pageHead({ title: '그림체 뽑기', desc: 'NAI V5 작가 태그 믹스를 무작위로 뽑습니다. 작가 수 · 가중치 · 순서를 섞고, 고정한 작가는 매번 들어갑니다.' }),
     h('div', { class: 'gacha-grid' },
-      h('div', { class: 'stack', style: { gap: '14px' } }, poolCard(), pinnedCard(), rulesCard()),
+      h('div', { class: 'stack', style: { gap: '14px' } }, modeBar(),
+        baseMode() ? [baseCard(), variantCard(), poolCard(), rulesCard()] : [poolCard(), pinnedCard(), rulesCard()]),
       h('div', { class: 'stack', style: { gap: '14px' } }, drawBar(), resultsSection())));
 }
 
@@ -388,7 +532,25 @@ export default {
         config: { ...DEFAULT_CONFIG, ...(saved.config || {}) },
         favorites: Array.isArray(saved.favorites) ? saved.favorites : [],
         history: Array.isArray(saved.history) ? saved.history : [],
+        base: saved.base && Array.isArray(saved.base.pairs) ? saved.base : null,
       };
+      baseThumb = null;
+      const wanted = app.params?.base;
+      if (wanted || data.base?.id) {
+        const combos = await get('/api/combos').catch(() => null);
+        const all = combos ? [...combos.active, ...combos.excluded] : [];
+        const pick = wanted && all.find((c) => c.id === wanted);
+        if (wanted) {  // used once: coming back to this page later keeps whatever base is picked by then
+          delete app.params.base;
+          try { history.replaceState(null, '', '#/gacha'); } catch { /* the hash stays */ }
+        }
+        if (pick) {
+          data.base = { pairs: pick.pairs.map((x) => [x.w, x.tag]), locked: [], id: pick.id };
+          data.config.mode = 'base';
+          baseThumb = pick.thumb;
+          persist();
+        } else if (data.base?.id) baseThumb = all.find((c) => c.id === data.base.id)?.thumb || null;
+      }
       if (Array.isArray(saved.results)) results = saved.results.slice(0, RESULTS_LIMIT);
       scoreCache = null;
     } catch (error) {

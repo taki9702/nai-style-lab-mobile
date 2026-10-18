@@ -803,6 +803,7 @@ export function comboPreview(c, app, onClose = null) {
         ? h('button', { class: 'btn sm', onclick: () => reviveCombos(app, [c.id]) }, icon('refresh'), '부활')
         : h('button', { class: 'btn primary sm', disabled: !c.rated || running, onclick: () => startRefine(app, c) }, icon('wand'), '다듬기'),
       h('button', { class: 'btn sm', onclick: () => editElo(app, [c.id], c.elo) }, icon('pen'), 'Elo'),
+      h('button', { class: 'btn sm', onclick: () => app.go('gacha', { base: c.id }) }, icon('target'), '이 틀로 뽑기'),
       h('button', { class: 'btn sm', onclick: () => saveImage(c) }, icon('download'), '저장'),
       h('button', { class: 'btn sm', onclick: () => openOriginal(c) }, icon('share'), '공유')),
     h('div', { class: 'kv' }, h('div', { class: 'tier-cell' }, tierChip(c)),

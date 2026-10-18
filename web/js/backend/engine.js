@@ -310,7 +310,7 @@ export class Engine {
   comboView(combo, tiers = null, role = null) {
     tiers ??= this._tiers();
     const [tier, provisional, grade, rank, child] = tiers.get(combo.id) || [null, false, null, null, false];
-    const excluded = (combo.excluded || {}).reason ?? null;
+    const excluded = combo.excluded?.rejected ? '쳐냄' : (combo.excluded || {}).reason ?? null;  // 쳐냄: set aside from the arena (a 제외)
     const image = combo.image_file;
     return {
       id: combo.id, style: combo.style,
@@ -875,6 +875,88 @@ export class Engine {
     return this.match(cur);
   }
 
+  // 쳐내기: the picture on this side loses this match (counted like any loss: Elo, record, artist 승률), then it is
+  // set aside as 제외 — kept with its record, so it still counts in the artist scores, and 그림체 can revive or delete it.
+  // A newcomer still being placed is put at the lowest place its votes allow; a ladder rung rejected during a
+  // placement just leaves the ladder. One undo brings everything back.
+  reject(side) {
+    const cur = this.current;
+    if (!cur || !['a', 'b'].includes(side)) throw new UserError('지금 쳐낼 대결이 없습니다.');
+    if (!['league', 'top', 'tie', 'place'].includes(cur.kind)) throw new UserError('진화 평가와 다듬기 대결에서는 쳐낼 수 없습니다. 평가를 마친 뒤 그림체에서 정리해 주세요.');
+    const [loserId, winnerId] = side === 'a' ? [cur.a, cur.b] : [cur.b, cur.a];
+    if (this._protected().has(loserId)) throw new UserError('진행 중인 진화에 쓰이는 조합은 세대를 확정한 뒤 쳐낼 수 있습니다.');
+    if (this.state.improve && this.state.improve.base_id === loserId) throw new UserError('다듬기 중인 원본은 다듬기를 마친 뒤 쳐낼 수 있습니다.');
+    const loser = this.find(loserId), winner = this.find(winnerId);
+    if (!loser || !winner) throw new UserError('지금 쳐낼 대결이 없습니다.');
+    const snap = {
+      kind: 'reject', id: loserId, index: this.combos.indexOf(loser), entry: null,
+      combos: { [loserId]: clone(loser), [winnerId]: clone(winner) },
+      artists: Object.fromEntries(this.state.artists.map((a) => [a.tag, { arena_matches: a.arena_matches, arena_wins: a.arena_wins }])),
+      placement: clone(this.state.placement ?? null),
+    };
+    const firstEntry = this.state.history[0];
+    const stack = this.undoStack.slice();
+    if (cur.kind === 'place') {
+      const p = this.state.placement;
+      if (p && loserId === p.id) {
+        this._recordPlace(cur, winnerId);
+        if (this.state.placement && this.state.placement.id === loserId) this._settlePlacementLow();
+      } else if (p) {
+        const at = p.ladder.indexOf(loserId);
+        if (at >= 0) { p.ladder.splice(at, 1); p.scores.splice(at, 1); }
+      }
+    } else {
+      this._voteRegular(cur, winnerId);
+    }
+    this.undoStack = stack;  // the reject snapshot below undoes the vote too
+    if (this.state.history[0] !== firstEntry) snap.entry = this.state.history[0];
+    this.combos = this.combos.filter((c) => c.id !== loserId);
+    loser.excluded = { reason: '제외', generation: this.selection.generation, rejected: true };
+    this.retired.push(loser);
+    snap.match = clone(cur);
+    this._pushUndo(snap);
+    this.lastPair = [cur.a, cur.b];
+    this.current = null;
+    this.save();
+    return this.match(cur);
+  }
+
+  _settlePlacementLow() {
+    const p = this.state.placement;
+    const combo = this.find(p.id);
+    if (combo) {
+      const votes = this._placementVotes(p);
+      combo.elo = core.placementElo(core.placementLowSlot(votes, p.ladder.length), p.scores);
+      const played = votes.filter((v) => v[1] !== 'tie');
+      combo.matches += played.length;
+      combo.wins += played.filter((v) => v[1] === 'win').length;
+      combo.placed = true;
+    }
+    this.state.placement = null;
+  }
+
+  _undoReject(snap) {
+    const loser = this.retired.find((c) => c.id === snap.id);
+    if (!loser) {
+      this.undoStack = [];
+      throw new UserError('쳐낸 조합이 이미 지워져 되돌릴 수 없습니다.');
+    }
+    if (snap.entry) {
+      const index = this.state.history.indexOf(snap.entry);
+      if (index >= 0) this.state.history.splice(index, 1);
+    }
+    this.selection.retired = this.retired.filter((c) => c.id !== snap.id);
+    for (const [id, saved] of Object.entries(snap.combos)) {
+      const combo = id === snap.id ? loser : this.find(id);
+      if (!combo) continue;
+      for (const k of Object.keys(combo)) delete combo[k];
+      Object.assign(combo, clone(saved));
+    }
+    this.combos.splice(Math.min(Math.max(snap.index, 0), this.combos.length), 0, loser);
+    for (const artist of this.state.artists) Object.assign(artist, snap.artists[artist.tag] || {});
+    this.state.placement = snap.placement;
+  }
+
   _pushUndo(snap) {
     this.undoStack.push(snap);
     if (this.undoStack.length > UNDO_LIMIT) this.undoStack.shift();
@@ -949,6 +1031,8 @@ export class Engine {
       Object.assign(imp, snap.before);
     } else if (kind === 'tie_skip') {
       this.skippedTies.delete(snap.key);
+    } else if (kind === 'reject') {
+      this._undoReject(snap);
     }
     const restored = snap.match;
     this.current = restored && this.findAny(restored.a) && this.findAny(restored.b) ? restored : null;

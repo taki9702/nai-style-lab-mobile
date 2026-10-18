@@ -322,3 +322,20 @@ button { touch-action: manipulation; }
 }
 .toast .toast-action { flex: none; align-self: center; }
 .gresult-actions .danger-text svg { width: 15px; height: 15px; }
+
+/* 대결: 쳐내기 on each picture */
+.fighter .art .reject-btn { height: 28px; padding: 0 9px; gap: 4px; font-size: 12px; background: rgba(5, 6, 10, 0.62); border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #ffb3b8; backdrop-filter: blur(6px); }
+.fighter .art .reject-btn svg { width: 13px; height: 13px; }
+.fighter .art .corner.br { bottom: 8px; right: 8px; }
+.compare-top .danger-text { white-space: nowrap; }
+
+/* 뽑기: 기준 그림체 */
+.gacha-mode { width: 100%; display: flex; }
+.gacha-mode button { flex: 1; }
+.base-row { display: flex; gap: 10px; align-items: flex-start; }
+.base-thumb { width: 72px; aspect-ratio: 13 / 19; object-fit: cover; border-radius: 10px; flex: none; border: 1px solid var(--line-2); }
+.base-row .gchips { flex: 1; min-width: 0; margin-top: 0; }
+.gresult-gone { margin: 6px 0 0; color: var(--text-3); }
+.dialog.picker-dialog { width: min(720px, calc(100vw - 24px)); max-height: calc(100vh - 80px); display: flex; flex-direction: column; }
+.dialog.picker-dialog .picker-grid { overflow-y: auto; flex: 1; min-height: 0; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; padding: 2px; }
