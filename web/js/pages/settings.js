@@ -1,0 +1,346 @@
+// 설정 — everything saves as you type. The combo rules are edited on 작가 · 조합 만들기.
+import { get, post, keepDraft } from '../api.js';
+import { h, morph, limits, icon, toast, fmt, confirmDialog, promptDialog, pageHead, card, pickFile } from '../ui.js';
+
+// The settings themselves are app.conf (one copy for every page). showKey: the API key shown in clear.
+// chars: the character prompts being edited (empty boxes included, which the server drops on save).
+let root, app, showKey = false, chars = null;
+const pending = {};
+let timer = null;
+
+// Typing only remembers the text; it is saved once, when the field is left (its change event),
+// on a tab switch or leaving the page, or as the window closes (Python keeps the draft for that).
+function stage(key, value) {
+  pending[key] = value;
+  if (key in s()) s()[key] = value;  // a re-render (tab switch) before the save returns keeps what was typed
+  keepDraft({ ...pending });
+}
+
+function save(key, value) {
+  stage(key, value);
+  clearTimeout(timer);
+  timer = setTimeout(flush, 450);
+}
+
+async function flush() {
+  const changes = { ...pending };
+  for (const key of Object.keys(pending)) delete pending[key];
+  if (!Object.keys(changes).length) return;
+  try {
+    app.conf.settings = await post('/api/settings', { changes });
+    keepDraft({ ...pending });  // saved: only what was typed since is left to save on close
+    markSaved();
+    app.refresh();
+  } catch (error) {
+    keepDraft({ ...pending });  // refused: like any refused change, it is not saved on close either
+    toast(error.message, 'error');
+    // The server kept nothing of a refused change: show what is really saved again.
+    app.conf = await get('/api/settings').catch(() => app.conf);
+    chars = null;
+    render();
+  }
+}
+
+// Same bottom-left popup as every other notice; typing is debounced, so one per pause.
+function markSaved() {
+  toast('저장했습니다.', 'ok', 1600);
+}
+
+const s = () => app.conf.settings;
+
+function field(label, control, help) {
+  return h('div', { class: 'field' }, h('label', {}, label), control, help ? h('div', { class: 'help' }, help) : null);
+}
+
+function number(key, { step = 1, width } = {}) {
+  // Typed only (no spin buttons, ↑/↓ or wheel; see app.js): remember what is typed, save once when the
+  // field is left (or Enter), like the text fields. Its limits come from the server's one table.
+  return h('input', { class: 'input num', type: 'number', step, ...limits(key), value: s()[key], style: width ? { width } : null,
+    oninput: (e) => { const v = e.currentTarget.value; if (v !== '') stage(key, step < 1 ? parseFloat(v) : parseInt(v, 10)); },
+    onblur: flush, onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); } });
+}
+
+function select(key, options) {
+  return h('select', { class: 'select', onchange: (e) => save(key, e.currentTarget.value) },
+    options.map((o) => h('option', { value: o, selected: s()[key] === o }, o)));
+}
+
+// The shared card (ui.js), called positionally: every settings card has an icon, tone, title and line.
+const section = (iconName, tone, title, desc, ...body) => card({ icon: iconName, tone, title, desc }, ...body);
+
+function connection() {
+  const conf = app.conf;
+  const key = h('input', { class: 'input', id: 'api-key', type: showKey ? 'text' : 'password', value: conf.api_key, placeholder: 'pst-로 시작하는 NovelAI 영구 API 토큰', autocomplete: 'off',
+    onchange: (e) => saveKey(e.currentTarget.value), onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); } });
+  const reveal = h('button', { class: 'btn icon-btn', 'aria-label': '키 보기', onclick: () => { showKey = !showKey; render(); } },
+    icon(showKey ? 'eyeOff' : 'eye'));
+  const sub = conf.subscription;
+  const subView = !sub ? (conf.api_key ? h('span', { class: 'faint' }, '아직 조회하지 않았습니다.') : null)
+    : sub.error ? h('span', { style: { color: 'var(--red)' } }, sub.error)
+    : h('div', { class: 'row wrap', style: { gap: '8px' } },
+      h('span', { class: 'badge accent' }, sub.tier), sub.active ? null : h('span', { class: 'badge red' }, '구독 비활성'),
+      sub.anlas != null ? h('span', { class: 'badge' }, `Anlas ${fmt(sub.anlas)}`) : null,
+      sub.remaining_percent != null ? h('span', { class: 'badge' }, `잔여 ${sub.remaining_percent}%`) : null,
+      sub.estimate ? h('span', { class: 'badge mint' }, `예상 ${fmt(sub.estimate.left)} / ${fmt(sub.estimate.total)}장`) : null,
+      h('span', { class: 'note' }, `${sub.checked} 조회`));
+  return section('key', '', 'NovelAI 연결', 'API 키는 이 폰의 앱 안에만 저장되고, 데이터 내보내기 zip에도 들어갑니다. zip을 남에게 줄 때는 조심하세요.',
+    field('API 키', h('div', { class: 'input-group' }, key, reveal,
+      h('button', { class: 'btn primary', onclick: () => saveKey(root.querySelector('#api-key').value) }, '조회'))),
+    h('div', { class: 'row', style: { marginTop: '10px' } }, subView),
+    sub?.estimate ? h('p', { class: 'note' }, '예상 장수는 예측값으로 계산한 값입니다 (V5 무제한 범위만).') : null,
+    h('div', { class: 'row wrap', style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--line)', gap: '10px' } },
+      h('span', { class: 'note', style: { flex: 1, minWidth: '200px' } },
+        'API 키 발급 방법: ≡ → Account Settings → Get Persistent API Token'),
+      h('button', { class: 'btn',
+        onclick: () => app.act(post('/api/open-novelai')) }, icon('key'), '키 발급받기')));
+}
+
+function generation() {
+  const meta = app.meta;
+  const seed = h('input', { class: 'input num', value: s().seed, placeholder: '비우면 무작위', inputmode: 'numeric',
+    onchange: (e) => save('seed', e.currentTarget.value.trim()) });
+  return section('image', 'sky', '이미지 생성', '모든 그림(무작위 조합, 진화 조합, 다듬기, 자유 생성)이 이 설정과 하나의 시드로 그려집니다.',
+    h('div', { class: 'grid gen-grid' },
+      field('모델', select('model', meta.models)),
+      field('크기', select('size', meta.sizes)),
+      field('샘플러', select('sampler', meta.samplers)),
+      field('Steps', number('steps'), '28 이하가 무제한 범위입니다.'),
+      field('CFG (Scale)', number('cfg', { step: 0.1 })),
+      field('CFG Rescale', number('cfg_rescale', { step: 0.05 })),
+      field('생성 간 대기 (초)', number('delay', { step: 0.5 })),
+      h('div', { class: 'field seed-field' }, h('label', {}, '시드'),
+        h('div', { class: 'input-group' }, seed,
+          h('button', { class: 'btn', onclick: () => { save('seed', String(Math.floor(Math.random() * meta.max_seed))); render(); } }, icon('refresh'), '무작위')))));
+}
+
+function prompts() {
+  const base = h('textarea', { class: 'textarea grow', rows: 3, value: s().base_prompt,
+    oninput: (e) => stage('base_prompt', e.currentTarget.value), onchange: flush });
+  const negative = h('textarea', { class: 'textarea grow', rows: 4, value: s().negative,
+    oninput: (e) => stage('negative', e.currentTarget.value), onchange: flush });
+  chars ??= (s().character_prompt || []).map((p, i) => ({ p, n: s().character_negative?.[i] ?? '' }));
+  // Both lists go together, so the server keeps each negative with its character.
+  const stageChars = () => { stage('character_prompt', chars.map((c) => c.p)); stage('character_negative', chars.map((c) => c.n)); };
+  const box = (c, key, placeholder) => h('textarea', { class: 'textarea grow', rows: 2, value: c[key], placeholder,
+    oninput: (e) => { c[key] = e.currentTarget.value; stageChars(); }, onchange: flush });
+  const list = h('div', { class: 'stack' }, chars.map((c, i) =>
+    h('div', { class: 'row', style: { alignItems: 'flex-start' } }, h('span', { class: 'badge', style: { marginTop: '8px' } }, `캐릭터 ${i + 1}`),
+      h('div', { class: 'stack', style: { flex: 1, gap: '6px' } },
+        box(c, 'p', `캐릭터 ${i + 1} 프롬프트`), box(c, 'n', `캐릭터 ${i + 1} 네거티브`)),
+      h('button', { class: 'btn ghost icon-btn', 'aria-label': '삭제', onclick: () => { chars.splice(i, 1); stageChars(); flush(); render(); } }, icon('x')))),
+    h('button', { class: 'btn sm', style: { alignSelf: 'flex-start' }, onclick: () => { chars.push({ p: '', n: '' }); render(); } }, icon('plus'), '캐릭터 추가'));
+  return section('brush', 'rose', '프롬프트', '작가 조합은 기본 프롬프트의 {artist} 자리에 들어갑니다. {artist}가 없으면 맨 앞에 붙습니다.',
+    h('div', { class: 'stack' },
+      field('기본 프롬프트', base, h('span', {}, h('code', {}, '{artist}'), ' 위치에 작가 태그가 들어갑니다.')),
+      field('캐릭터 프롬프트', list),
+      field('네거티브 프롬프트', negative)),
+    app.status?.stage.checklist.prompt ? null : h('div', { id: 'prompt-confirm', class: 'row', style: { marginTop: '14px' } },
+      h('span', { class: 'note', style: { flex: 1 } }, '기본값 그대로 사용하려면 오른쪽 버튼을 누르세요.'),
+      h('button', { class: 'btn primary', onclick: () => app.act(post('/api/settings', { changes: { prompt_checked: true } }), '프롬프트를 확인했습니다.') },
+        icon('check'), '이대로 사용')));
+}
+
+// 다시 그리기: the listed combos (all, or the top 30%) drawn again with the prompts above (another character),
+// replacing their pictures. The export sits next to it: that zip is the only way back to the old pictures.
+function redraw() {
+  return section('refresh', 'sky', '다시 그리기', '바꾼 프롬프트, 시드로 조합을 다시 그려 그림을 바꿉니다. 순위는 그대로입니다.',
+    h('div', { class: 'row wrap' },
+      h('button', { class: 'btn', disabled: Boolean(exporting), onclick: exportData }, icon('download'), '데이터 내보내기'),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn primary', onclick: () => startRedraw(true) }, icon('refresh'), '상위 30%'),
+      h('button', { class: 'btn primary', onclick: () => startRedraw(false) }, icon('refresh'), '전체')),
+    h('p', { class: 'note' }, '원래 그림은 지워지니, 되돌리려면 먼저 내보내 두세요.'));
+}
+
+async function startRedraw(top) {
+  await flush();  // what was just typed is what gets drawn
+  // One image per combo redrawn: say how many up front, against what the subscription has left when known.
+  const n = (top ? app.status?.counts?.top : app.status?.counts?.active) ?? 0;
+  const left = app.conf.subscription?.estimate?.left;
+  const what = top ? '상위 30% 조합' : '목록의 모든 조합';
+  const ok = await confirmDialog({ title: top ? '상위 30% 다시 그리기' : '전체 다시 그리기', ok: '다시 그리기', danger: true, text:
+    `⚠ 그림을 ${fmt(n)}장 새로 생성합니다${left != null ? ` (남은 예상 장수 ${fmt(left)}장)` : ''}. 조합이 많으면 시간과 생성량이 크게 듭니다.\n\n` +
+    `${what}을 바꾼 프롬프트, 시드로 다시 그리고, 원래 그림을 지웁니다. 순위는 그대로입니다.\n순위가 높은 조합부터 그리며, 중간에 멈추면 새 그림과 원래 그림이 섞입니다.\n` +
+    (top ? '나머지 조합은 원래 그림 그대로라, 대결에서 캐릭터가 다른 그림끼리 붙을 수 있습니다.\n' : '') +
+    '되돌리려면 먼저 데이터 내보내기를 해 두세요.' });
+  if (ok) await app.act(post('/api/generate/redraw', { top }), '다시 그리기를 시작했습니다.');
+}
+
+// 업데이트: this version and the newest release on GitHub. Installing downloads the new APK in the browser; opening it
+// installs over this one (same signing key), and the app's data stays.
+function update() {
+  const u = app.status?.update;
+  if (!u) return null;
+  const line = u.state === 'checking' ? '확인하는 중입니다.'
+    : u.state === 'available' ? `새 버전 v${u.latest}이(가) 있습니다.`
+    : u.state === 'latest' ? '최신 버전입니다.' : '';
+  return named(section('download', 'sky', '업데이트', `지금 버전 v${u.current}`,
+    line ? h('p', { class: 'note', style: { color: 'var(--text)', marginTop: 0 } }, line) : null,
+    u.error ? h('p', { class: 'note', style: { color: 'var(--red)', marginTop: line ? '6px' : 0 } }, u.error) : null,
+    u.state === 'available' && u.notes ? h('pre', { class: 'release-notes' }, u.notes) : null,
+    h('div', { class: 'row wrap', style: { marginTop: '12px' } },
+      u.state === 'available' ? h('button', { class: 'btn primary', onclick: installUpdate }, icon('download'), 'APK 받기') : null,
+      h('button', { class: 'btn', disabled: u.state === 'checking', onclick: () => app.act(post('/api/update/check')) }, icon('refresh'), '업데이트 확인'),
+      h('button', { class: 'btn ghost', onclick: () => app.act(post('/api/update/page')) }, '릴리스 페이지')),
+    h('p', { class: 'note' }, '받은 APK를 열면 지금 앱 위에 덮어서 설치됩니다. 데이터는 그대로 남습니다.')), 'update');
+}
+
+async function installUpdate() {
+  const u = app.status.update;
+  const ok = await confirmDialog({ title: `v${u.latest}로 업데이트`, ok: 'APK 받기', text:
+    '브라우저에서 새 버전 APK를 받습니다. 다 받은 뒤 알림이나 다운로드 폴더에서 파일을 열고 "업데이트"를 누르면 됩니다.\n처음이라면 "이 출처 허용"을 켜 달라고 할 수 있습니다.' });
+  if (ok) await app.act(post('/api/update/install'));
+}
+
+function data() {
+  return section('folder', 'mint', '데이터', '조합 · 그림 · 순위 · 진화 기록 · 작가 · 설정 · 뽑기 기록이 이 폰의 앱 안에 저장됩니다.',
+    h('div', { class: 'row wrap' },
+      h('button', { class: 'btn', disabled: exporting, onclick: exportData }, icon('download'), exporting ? `내보내는 중 ${exporting}` : '데이터 내보내기'),
+      h('button', { class: 'btn', disabled: Boolean(exporting), onclick: importData }, icon('upload'), '데이터 불러오기'),
+      exported ? h('button', { class: 'btn ghost', onclick: () => app.act(post('/api/data/share-export')) }, icon('share'), '내보낸 파일 공유') : null),
+    h('p', { class: 'note' },
+      '내보내기는 모든 데이터를 zip 하나로 묶어 다운로드 폴더에 저장합니다. PC용 NAI Style Lab의 내보내기 zip과 같은 형식이라 PC와 폰 사이에서 그대로 옮길 수 있습니다. 불러오면 지금의 데이터는 모두 그 파일의 내용으로 바뀝니다.'));
+}
+
+let exporting = null, exported = false;
+
+async function exportData() {
+  exporting = '…';
+  render();
+  try {
+    const result = await app.act(post('/api/data/export', { onProgress: (done, total) => { exporting = `${done}/${total}`; render(); } }));
+    exported = Boolean(result?.share);
+    if (result?.path) toast(`데이터를 내보냈습니다: ${result.path}`, 'ok', 9000);
+  } catch { /* shown */ } finally {
+    exporting = null;
+    render();
+  }
+}
+
+async function importData() {
+  const file = await pickFile('.zip,application/zip,application/x-zip-compressed,application/octet-stream');
+  if (!file) return;
+  const ok = await confirmDialog({ title: '데이터 불러오기', ok: '불러오기', danger: true,
+    text: `${file.name}
+
+지금의 조합·이미지·순위·진화·작가·설정이 이 파일의 내용으로 바뀝니다. 백업을 남기지 않으니, 필요하면 먼저 내보내기 해 두세요. 파일에 API 키가 들어 있으면 그 키로 바뀝니다.` });
+  if (!ok) return;
+  exporting = '불러오는 중';
+  render();
+  try {
+    const result = await app.act(post('/api/data/import', { file, onProgress: (done, total) => { exporting = `불러오는 중 ${done}/${total}`; render(); } }));
+    toast(`데이터를 불러왔습니다. 조합 ${fmt(result.combos)}개, 이미지 ${fmt(result.images)}장.`, 'ok');
+  } catch { /* shown */ } finally {
+    exporting = null;
+    chars = null;
+    render();
+  }
+}
+
+const RESETS = [
+  ['ratings', '순위 기록', '모든 Elo·전적·투표 기록을 지웁니다. 조합과 이미지는 남고, 대결에서 자리를 다시 찾습니다.'],
+  ['evolution', '진화 기록', '세대 번호와 진화 로그만 1세대로 되돌립니다. 조합과 순위는 그대로입니다.'],
+  ['settings', '설정', '생성 설정·조합 규칙·프롬프트를 기본값으로 되돌립니다. API 키와 시드는 유지합니다.'],
+  ['artists', '작가 목록', '등록한 작가를 지우고 기본 작가 목록으로 되돌립니다.'],
+  ['combos', '데이터만 초기화', '조합·이미지·순위·진화·다듬기 기록을 모두 지웁니다. 작가 목록·설정·API 키는 유지합니다.', true],
+  ['all', '모두 초기화', '데이터를 모두 지우고 처음 설치한 상태로 되돌립니다.', true],
+];
+
+async function reset([scope, title, text, heavy]) {
+  const warn = `${text}\n\n⚠ 이 작업은 절대 되돌릴 수 없습니다.`;
+  const ok = heavy
+    ? (await promptDialog({ title: `${title}`, text: `${warn}\n계속하려면 "초기화"를 입력하세요.`, ok: '초기화', placeholder: '초기화' }))?.trim() === '초기화'
+    : await confirmDialog({ title: `${title} 초기화`, text: warn, ok: '초기화', danger: true });
+  if (!ok) return;
+  await app.act(post('/api/reset', { scope }), '초기화에 성공하였습니다.');
+  chars = null;
+  render();
+}
+
+function resets() {
+  return section('trash', 'rose', '초기화', '초기화하면 바로 지워지며, 절대 되돌릴 수 없습니다.',
+    h('div', { class: 'stack', style: { gap: '10px' } }, RESETS.map((item) =>
+      h('div', { class: 'row', style: { justifyContent: 'space-between', gap: '12px' } },
+        h('div', {}, h('div', { style: { fontWeight: 600 } }, item[1]), h('div', { class: 'note' }, item[2])),
+        h('button', { class: `btn sm ${item[3] ? 'danger' : ''}`, style: { flex: 'none' }, onclick: () => reset(item) }, '초기화')))));
+}
+
+// Tabs keep every part of the settings on one screen without scrolling.
+const TABS = [['basic', '연결 · 생성'], ['prompts', '프롬프트'], ['data', '데이터']];
+const TAB_OF = { connection: 'basic', prompts: 'prompts', update: 'data' };
+let tab = 'basic';
+
+function render() {
+  const columns = (left, right) => h('div', { class: 'grid settings-columns', style: { alignItems: 'start' } },
+    h('div', { class: 'stack', style: { gap: '16px' } }, left), h('div', { class: 'stack', style: { gap: '16px' } }, right));
+  const body = tab === 'prompts' ? h('div', { class: 'stack', style: { gap: '16px' } }, named(prompts(), 'prompts'), redraw())
+    : tab === 'data' ? columns([update(), data()], resets())
+    : columns([named(connection(), 'connection')], generation());
+  morph(root,
+    pageHead({ title: '설정', desc: '바꾸면 바로 저장됩니다.',
+      below: h('div', { class: 'segmented', role: 'tablist', 'aria-label': '설정 항목', style: { marginTop: '14px' } },
+        TABS.map(([id, label]) => h('button', { class: tab === id ? 'on' : '', role: 'tab', 'aria-selected': String(tab === id),
+          onclick: () => { flush(); tab = id; render(); } }, label))) }),
+    body);
+}
+
+// The setup guide and "지금 할 일" link here with ?focus=<section id>. That card stays marked for as long
+// as this page is open, whether or not the step is already done, so it is always clear where you were sent.
+let highlight = null;
+
+const named = (el, id) => {
+  el.id = id;
+  if (id === highlight) el.style.outline = '2px solid var(--accent)';
+  return el;
+};
+
+function focusSection() {
+  const id = app.params.focus;
+  const target = id && document.getElementById(id);
+  highlight = target ? id : null;
+  if (!target) return;
+  target.style.outline = '2px solid var(--accent)';
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Saving the key always checks the subscription too, so a wrong key shows up right away.
+// The button click follows the input's change event: both share one in-flight save.
+let keySaving = null;
+function saveKey(value) {
+  keySaving ??= (async () => {
+    try {
+      value = value.trim();
+      save('api_key', value);
+      await flush();
+      if (value) await app.act(post('/api/subscription'));
+      else await app.refresh();
+      render();
+    } finally {
+      keySaving = null;
+    }
+  })();
+  return keySaving;
+}
+
+export default {
+  async mount(el, appRef) {
+    app = appRef;
+    root = h('div');
+    el.append(root);
+    tab = TAB_OF[app.params.focus] ?? tab;
+    render();
+    focusSection();
+  },
+  unmount() {
+    flush();
+    highlight = null;
+    chars = null;
+    showKey = false;
+  },
+  // morph() keeps what is being typed, so the page can follow every change of the settings.
+  onStatus(status, previous, force) {
+    if (force || previous?.settings_rev !== status.settings_rev
+        || previous?.stage.checklist.prompt !== status.stage.checklist.prompt
+        || JSON.stringify(previous?.update) !== JSON.stringify(status.update)) render();
+  },
+};

@@ -1,0 +1,194 @@
+// 작가 · 조합 만들기 — register artists, then roll random combos that will find their place in the arena.
+import { get, post } from '../api.js';
+import { h, morph, limits, icon, toast, fmt, confirmDialog, promptDialog, shortTag, pickSelect, selectionKeys, pageHead, card, touch } from '../ui.js';
+
+let root, app, artists = [];
+// addText / customText / countDraft: what is typed in the artist and combo boxes and "만들 개수" (the count until a start saves it).
+// customCount: 특정 조합 만들기's own count (only a combo with __random__ makes more than one).
+const view = { q: '', sort: 'score', dir: -1, selected: new Set(), anchor: null, addText: '', countDraft: null, customText: '', customCount: 1 };
+
+function sorted() {
+  const q = view.q.trim().toLowerCase();
+  const list = artists.filter((a) => !q || a.tag.toLowerCase().includes(q));
+  const key = view.sort;
+  // Name order matches Windows Explorer (numbers by value); it also breaks ties in the other columns.
+  const byName = (a, b) => a.tag.localeCompare(b.tag, 'ko', { numeric: true });
+  return list.sort((a, b) => (key === 'tag' ? byName(a, b) * view.dir : (a[key] - b[key]) * view.dir || byName(a, b)));
+}
+
+function artistTable() {
+  const list = sorted();
+  const head = (key, label, num) => h('th', { class: num ? 'num' : '', onclick: () => {
+    view.dir = view.sort === key ? -view.dir : key === 'tag' ? 1 : -1;
+    view.sort = key;
+    render();
+  } }, label, view.sort === key ? h('span', { class: 'dir' }, view.dir > 0 ? '▲' : '▼') : null);
+  const pick = (a, event) => {
+    // A finger has no Ctrl key: every tap adds or removes that one artist.
+    pickSelect(view, a.tag, touch ? { ctrlKey: true } : event, list.map((x) => x.tag));
+    render();
+  };
+  return h('div', { class: 'table-wrap', style: { maxHeight: '100%' } },
+    h('table', { class: 'data artists' },
+      h('thead', {}, h('tr', {}, head('order', '#', true), head('tag', '작가'), head('score', '점수', true), head('count', '사용', true), head('winrate', '승률', true))),
+      h('tbody', {}, list.map((a) => h('tr', { key: a.tag, class: view.selected.has(a.tag) ? 'selected' : '', onclick: (e) => pick(a, e) },
+        h('td', { class: 'num' }, fmt(a.order)), h('td', {}, shortTag(a.tag)), h('td', { class: 'num' },
+          a.combos ? `${a.score > 0 ? '+' : ''}${fmt(a.score)}` : '–'), h('td', { class: 'num' }, fmt(a.count)),
+        h('td', { class: 'num' }, a.arena_matches ? `${Math.round(a.winrate * 100)}%` : '–'))))));
+}
+
+function tableBar() {
+  return h('div', { class: 'row', style: { marginTop: '10px' } },
+    h('span', { class: 'note' }, view.selected.size ? `${view.selected.size}명 선택` : touch ? '눌러서 여러 명 선택' : 'Shift/Ctrl로 여러 명 선택'),
+    h('span', { class: 'spacer' }),
+    // Renaming is for one artist: its button shows next to delete while exactly one is selected.
+    view.selected.size === 1 ? h('button', { class: 'btn sm', onclick: () => rename([...view.selected][0]) }, icon('pen'), '이름 바꾸기') : null,
+    view.selected.size ? h('button', { class: 'btn danger sm', onclick: removeSelected }, icon('trash'), `${view.selected.size}명 삭제`) : null);
+}
+
+function render() {
+  const settings = app.settings;
+  const input = h('textarea', { class: 'textarea', rows: 4, value: view.addText, oninput: (e) => { view.addText = e.currentTarget.value; },
+    placeholder: 'artist:shigure ui, artist:rurudo\n프롬프트 전체를 붙여 넣어도 artist: 태그만 등록' });
+  const search = h('input', { class: 'input', type: 'search', placeholder: '작가 검색', value: view.q, oninput: (e) => { view.q = e.currentTarget.value; render(); } });
+  const count = h('input', { class: 'input', type: 'number', ...limits('gen_count'), value: view.countDraft ?? settings.gen_count, style: { width: '64px' },
+    oninput: (e) => { view.countDraft = e.currentTarget.value; } });
+  const working = app.status?.job?.running;
+  morph(root,
+    pageHead({ title: '작가 · 조합 만들기', keys: [[['Delete'], '삭제'], [['Esc'], '선택 해제'], [['Ctrl', 'A'], '모두 선택'], [[], 'Shift/Ctrl 클릭으로 여러 명 선택']],
+      desc: '좋아하는 작가들을 섞어 무작위 조합을 만들면, 대결에서 순위가 정해집니다.',
+      // Setup step: the default list counts as chosen once edited, or confirmed here as is.
+      below: app.status && !app.status.stage.checklist.artists && artists.length >= settings.gen_min
+        ? h('div', { class: 'row', style: { marginTop: '14px' } }, h('button', { class: 'btn primary', onclick: confirmArtists }, icon('check'), '이 목록 그대로 사용'),
+          h('span', { class: 'note' }, '작가를 더하거나 빼면 확인한 것으로 저장됩니다.')) : null }),
+    h('div', { class: 'grid library-grid', style: { alignItems: 'start', flex: 1, minHeight: 0 } },
+      card({ icon: 'users', title: `작가 ${fmt(artists.length)}명`, desc: '점수는 이 작가가 조합 순위에 기여한 정도입니다.',
+        cls: 'artists-card', style: { alignSelf: 'stretch', display: 'flex', flexDirection: 'column', minHeight: 0 } },
+        input,
+        h('div', { class: 'row', style: { margin: '10px 0 18px' } },
+          h('button', { class: 'btn', onclick: () => app.openPromptViewer() }, icon('image'), 'PNG에서'),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'btn primary', onclick: add }, icon('plus'), '작가 등록')),
+        h('label', { class: 'search', style: { display: 'block', marginBottom: '10px' } }, icon('search'), search),
+        h('div', { class: 'artist-table-box', style: { flex: 1, minHeight: 0 } }, artistTable()),
+        tableBar()),
+      h('div', { class: 'stack', style: { gap: '16px' } },
+      card({ icon: 'sparkle', tone: 'sky', title: '무작위 조합 만들기', desc: '등록한 작가를 랜덤으로 선택해 랜덤 가중치를 붙여 그림을 생성합니다.' },
+        h('div', { class: 'grid', style: { gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '16px' } },
+          rule('조합당 작가 수', pair(ruleInput('gen_min'), ruleInput('gen_max'))),
+          rule('가중치 범위', pair(ruleInput('global_min_w', 0.1), ruleInput('global_max_w', 0.1))),
+          rule('시드', h('div', { class: 'input-group' }, ruleInput('seed', null),
+            h('button', { class: 'btn sm', onclick: () => saveRule('seed', String(Math.floor(Math.random() * app.meta.max_seed))) }, icon('refresh'), '무작위')),
+          { gridColumn: 'span 2' })),
+        h('div', { class: 'row' }, h('span', { class: 'field-label' }, '만들 개수'), count, h('span', { class: 'spacer' }),
+          h('button', { class: 'btn primary lg', disabled: working, onclick: () => generate(Number(view.countDraft ?? settings.gen_count)) }, icon('zap'), working ? '생성 중…' : '만들기')),
+        h('p', { class: 'note' },
+          '작가 수와 가중치 범위는 진화와 다듬기에도 그대로 적용됩니다.')),
+      card({ icon: 'pen', tone: 'mint', title: '특정 조합 만들기', desc: '적은 작가와 가중치 그대로 조합을 만들고, 바로 그림을 생성합니다.' },
+        h('textarea', { class: 'textarea', rows: 3, value: view.customText, oninput: (e) => { view.customText = e.currentTarget.value; },
+          placeholder: '1.2::artist:rurudo ::, __random__, __random__\n__random__: 등록된 작가 중 무작위' }),
+        h('div', { class: 'row', style: { marginTop: '10px' } },
+          h('span', { class: 'field-label' }, '만들 개수'),
+          h('input', { class: 'input', type: 'number', ...limits('gen_count'), value: view.customCount, style: { width: '64px' },
+            title: '__random__이 있을 때만 여러 개를 만듭니다.', oninput: (e) => { view.customCount = e.currentTarget.value; } }),
+          h('span', { class: 'spacer' }),
+          h('button', { class: 'btn primary lg', disabled: working, onclick: makeCustom }, icon('zap'), working ? '생성 중…' : '만들기')),
+        h('p', { class: 'note' }, '등록되지 않은 작가는 함께 등록됩니다.')))));
+}
+
+function rule(label, value, style) {
+  return h('div', { style: { background: 'var(--surface-2)', borderRadius: '10px', padding: '10px 12px', ...style } },
+    h('div', { class: 'note' }, label), h('div', { style: { marginTop: '6px' } }, value));
+}
+
+const pair = (a, b) => h('div', { class: 'range-pair' }, a, h('span', {}, '~'), b);
+
+// The combo rules and the seed are edited here, where combos are made: saved when the field is left (or Enter);
+// a refused value is shown in the error toast and the field goes back to what is saved. step null: the seed
+// (text: it may be empty, which draws one on the first image).
+function ruleInput(key, step = 1) {
+  const seed = step == null;
+  return h('input', { class: 'input num', ...(seed ? { inputmode: 'numeric', placeholder: '비우면 무작위' } : { type: 'number', step, ...limits(key) }),
+    value: app.settings[key],
+    onchange: (e) => saveRule(key, seed ? e.currentTarget.value.trim() : Number(e.currentTarget.value)),
+    onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.blur(); } });
+}
+
+async function saveRule(key, value) {
+  await app.act(post('/api/settings', { changes: { [key]: value } }), '저장했습니다.').catch(() => {});
+  render();
+}
+
+async function load() {
+  try {
+    // The engine keeps artists in the order they were added: that place is the 등록 순 (# column).
+    artists = (await get('/api/artists')).map((a, i) => ({ ...a, order: i + 1 }));
+    render();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function add() {
+  if (!view.addText.trim()) return toast('등록할 작가를 입력해 주세요.', 'warn');
+  const result = await app.act(post('/api/artists/add', { text: view.addText }));
+  toast(result.added ? `작가 ${result.added}명을 등록했습니다.` : '새로 등록된 작가가 없습니다. 이미 있거나 비어 있습니다.', result.added ? 'ok' : 'info');
+  view.addText = '';
+  render();
+}
+
+async function confirmArtists() {
+  await app.act(post('/api/settings', { changes: { artists_checked: true } }), '작가 목록을 확인했습니다.');
+}
+
+async function rename(tag) {
+  // Edit just the name: the server puts "artist:" back in front.
+  const name = tag.replace(/^artist:/, '');
+  const value = await promptDialog({ title: '작가 이름 수정', text: '이 작가가 들어간 조합의 태그도 함께 바뀝니다.', value: name });
+  if (value == null || value.trim().replace(/^artist:/, '') === name) return;
+  await app.act(post('/api/artists/rename', { old: tag, new: value }), '이름을 바꿨습니다.');
+  view.selected.clear();
+  render();
+}
+
+async function removeSelected() {
+  const tags = [...view.selected];
+  const ok = await confirmDialog({ title: `작가 ${tags.length}명 삭제`, text: '명단에서만 빠지고, 이미 만든 조합은 그대로 남습니다.', ok: '삭제', danger: true });
+  if (!ok) return;
+  await app.act(post('/api/artists/delete', { tags }), `작가 ${tags.length}명을 삭제했습니다.`);
+  view.selected.clear();
+  render();
+}
+
+async function generate(count) {
+  await app.act(post('/api/generate/random', { count }), `조합 ${count}개를 만들기 시작했습니다. 완성되는 대로 대결에서 자리를 찾을 수 있습니다.`);
+  view.countDraft = null;  // saved as the default now
+}
+
+async function makeCustom() {
+  if (!view.customText.trim()) return toast('조합을 입력해 주세요.', 'warn');
+  await app.act(post('/api/generate/custom', { text: view.customText, count: Number(view.customCount) }),
+    '조합을 만들기 시작했습니다. 완성되는 대로 대결에서 자리를 찾을 수 있습니다.');
+  if (!view.customText.includes('__random__')) view.customText = '';  // a template with slots is kept to use again
+  render();
+}
+
+export default {
+  async mount(el, appRef) {
+    app = appRef;
+    app.setFill(true);
+    root = h('div', { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } });
+    el.append(root);
+    await load();
+  },
+  onStatus(status, previous, force) {
+    if (force || (previous && (previous.job?.running !== status.job?.running || previous.settings_rev !== status.settings_rev))) load();
+  },
+  unmount() {
+    view.countDraft = null;
+  },
+  // Same keys as the 그림체 list (Ctrl+A picks everyone the search shows).
+  onKey(event) {
+    selectionKeys(event, view, { order: () => sorted().map((a) => a.tag), remove: removeSelected, changed: render });
+  },
+};

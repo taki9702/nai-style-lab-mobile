@@ -1,0 +1,14 @@
+{
+  "appId": "io.github.taki9702.naistylelab",
+  "appName": "NAI Style Lab",
+  "webDir": "www",
+  "backgroundColor": "#0b0d12",
+  "android": {
+    "backgroundColor": "#0b0d12",
+    "adjustMarginsForEdgeToEdge": "force",
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "CapacitorHttp": { "enabled": false }
+  }
+}

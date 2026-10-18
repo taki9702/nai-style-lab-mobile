@@ -1,0 +1,25 @@
+{
+  "name": "nai-style-lab-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "NAI Style Lab for Android: NovelAI V5 artist-tag style finder and random style mixer",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "android:prepare": "node scripts/build.mjs && npx cap add android && node scripts/patch-android.mjs && npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/browser": "^7.0.0",
+    "@capacitor/clipboard": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/filesystem": "^7.0.0",
+    "@capacitor/share": "^7.0.0",
+    "@capacitor/status-bar": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
+    "esbuild": "^0.25.0"
+  }
+}
