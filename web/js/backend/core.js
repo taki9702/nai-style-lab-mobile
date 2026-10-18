@@ -53,6 +53,17 @@ export const rnd = {
     rnd.shuffle(pool);
     return pool.slice(0, k);
   },
+  // k items without replacement, each draw in proportion to its weight (선호 작가 반영).
+  weightedSample(arr, weights, k) {
+    const items = arr.map((x, i) => [x, weights[i]]);
+    const out = [];
+    while (out.length < k && items.length) {
+      const i = rnd.pick(items.map((_, j) => j), items.map(([, w]) => w));
+      out.push(items[i][0]);
+      items.splice(i, 1);
+    }
+    return out;
+  },
 };
 
 // Compare tuples the way Python does (numbers by value, strings by code point, booleans as 0/1).
@@ -356,10 +367,14 @@ const FAVOURITE_BOOST = 2;
 const TOP_PARENT_BOOST = 2;
 const MUTATE_WEIGHT_JITTER = 0.3;
 
-export function artistPreference(scores, tags) {
+// boost: how much more often the best-scored artist is drawn (the worst: 1/boost; no score yet: 1). Evolution uses 2, as the PC app.
+export function artistPreference(scores, tags, boost = FAVOURITE_BOOST) {
   const top = Math.max(0, ...tags.map((t) => Math.abs(scores[t] || 0)));
-  return Object.fromEntries(tags.map((t) => [t, top ? FAVOURITE_BOOST ** ((scores[t] || 0) / top) : 1.0]));
+  return Object.fromEntries(tags.map((t) => [t, top ? boost ** ((scores[t] || 0) / top) : 1.0]));
 }
+
+// 선호 작가 반영 levels (1 = off: every artist equally likely).
+export const FAVOR_LEVELS = [[1, '끔'], [1.5, '약하게 (×1.5)'], [2, '보통 (×2)'], [3, '강하게 (×3)']];
 
 export function pickParents(ranked) {
   const n = ranked.length;

@@ -4,22 +4,24 @@
 import { get, post } from '../api.js';
 import { h, morph, icon, toast, copyText, pageHead, card, emptyState, confirmDialog, shortTag, pickFile, novelaiMeta, stealthMeta, fmt } from '../ui.js';
 import { DEFAULT_CONFIG, parsePool, drawBatch, validate, mixText } from '../backend/gacha.js';
+import { FAVOR_LEVELS, artistPreference } from '../backend/core.js';
 
 const HISTORY_LIMIT = 200;
+const RESULTS_LIMIT = 100;
 const ORDERS = [['shuffle', '무작위 섞기'], ['pinned-first', '고정 작가 먼저'], ['weight-desc', '가중치 높은 순'], ['pool', '풀에 넣은 순서']];
 const POSITIONS = [['any', '자리 자유'], ['first', '맨 앞'], ['last', '맨 뒤']];
 const TAP_MODES = [['pin', '고정'], ['off', '제외'], ['delete', '삭제']];
 
 let root, app;
 let data = { pool: [], config: { ...DEFAULT_CONFIG }, favorites: [], history: [] };
-let results = [];
+let results = [];  // the latest draws (saved too, so they are still there after the app restarts)
 let selected = new Set();
 const view = { input: '', tap: 'pin', tab: 'results', poolOpen: true, rulesOpen: true };
 let saveTimer = null;
 
 function persist() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => post('/api/gacha/save', { data }).catch(() => {}), 400);
+  saveTimer = setTimeout(() => { saveTimer = null; post('/api/gacha/save', { data: { ...data, results } }).catch(() => {}); }, 400);
 }
 
 const cfg = () => data.config;
@@ -100,16 +102,33 @@ function setAll(state) {
 }
 
 // ---------------------------------------------------------------- drawing
-function draw() {
+// 선호 작가 반영: each free artist's draw weight from its 점수 in 작가 목록 (not registered / no score yet: ×1).
+let scoreCache = null;
+async function loadScores() {
+  try {
+    const artists = await get('/api/artists');
+    scoreCache = Object.fromEntries(artists.filter((a) => a.combos).map((a) => [a.tag, a.score]));
+  } catch { scoreCache = scoreCache || {}; }
+  return scoreCache;
+}
+async function preference() {
+  const boost = Number(cfg().favor) || 1;
+  if (!(boost > 1)) return null;
+  const scores = await loadScores();
+  const free = data.pool.filter((a) => (a.state || 'free') === 'free').map((a) => a.tag);
+  return artistPreference(scores, free, boost);
+}
+
+async function draw() {
   const problem = validate(data.pool, cfg());
   if (problem) return toast(problem, 'warn');
   const count = Math.max(1, Math.min(50, Math.trunc(Number(cfg().batch) || 1)));
   const avoid = new Set([...data.history.map((r) => r.key), ...results.map((r) => r.key)]);
-  const batch = drawBatch(data.pool, cfg(), count, avoid);
+  const batch = drawBatch(data.pool, cfg(), count, avoid, await preference());
   if (!batch.length) return toast('더 이상 새로운 조합을 만들 수 없습니다. 작가를 더 넣거나 범위를 넓혀 주세요.', 'warn');
   const at = Date.now();
   const made = batch.map((r, i) => ({ ...r, id: `${at.toString(36)}${i}`, time: at }));
-  results = [...made, ...results].slice(0, 100);
+  results = [...made, ...results].slice(0, RESULTS_LIMIT);
   data.history = [...made.map(({ id, key, text, style, pairs, time }) => ({ id, key, text, style, pairs, time })), ...data.history].slice(0, HISTORY_LIMIT);
   persist();
   view.tab = 'results';
@@ -126,9 +145,9 @@ function scrollToResults() {
   content.scrollTo({ top, behavior: 'smooth' });
 }
 
-function reroll(r) {
+async function reroll(r) {
   const avoid = new Set([...data.history.map((x) => x.key), ...results.map((x) => x.key)]);
-  const [fresh] = drawBatch(data.pool, cfg(), 1, avoid);
+  const [fresh] = drawBatch(data.pool, cfg(), 1, avoid, await preference());
   if (!fresh) return toast('더 이상 새로운 조합을 만들 수 없습니다.', 'warn');
   const next = { ...fresh, id: `${Date.now().toString(36)}r`, time: Date.now() };
   results = results.map((x) => (x.id === r.id ? next : x));
@@ -158,6 +177,46 @@ async function drawImages(list) {
   toast(`${r.count}개를 그리기 시작했습니다${r.skipped ? ` (이미 있는 ${r.skipped}개 제외)` : ''}. 다 그려지면 대결에서 자리를 찾아 주세요.`, 'ok');
   selected.clear();
   render();
+}
+
+// ---------------------------------------------------------------- deleting
+// 결과 · 기록: a draw is one entry in both (same id), so it goes from both. 즐겨찾기: only from the favourites.
+function removeEntries(tab, ids) {
+  const drop = new Set(ids);
+  const before = { results, history: data.history, favorites: data.favorites };
+  if (tab === 'favorites') data.favorites = data.favorites.filter((r) => !drop.has(r.id));
+  else {
+    results = results.filter((r) => !drop.has(r.id));
+    data.history = data.history.filter((r) => !drop.has(r.id));
+  }
+  for (const id of drop) selected.delete(id);
+  persist();
+  render();
+  return () => {
+    results = before.results;
+    data.history = before.history;
+    data.favorites = before.favorites;
+    persist();
+    render();
+  };
+}
+
+function deleteOne(r) {
+  const undo = removeEntries(view.tab, [r.id]);
+  toast(view.tab === 'favorites' ? '즐겨찾기에서 뺐습니다.' : '삭제했습니다.', 'ok', 5000, { label: '되돌리기', onclick: undo });
+}
+
+async function deleteMany(tab, list, { all = false } = {}) {
+  if (!list.length) return;
+  const where = tab === 'favorites' ? '즐겨찾기' : tab === 'history' ? '기록' : '결과';
+  const ok = await confirmDialog({
+    title: all ? `${where} 비우기` : `${list.length}개 삭제`,
+    text: tab === 'favorites' ? `즐겨찾기 ${list.length}개를 뺍니다.`
+      : `${where} ${list.length}개를 결과와 기록에서 지웁니다. 즐겨찾기에 넣은 것은 남습니다.\n이미 그려서 그림체 목록에 들어간 조합은 지워지지 않습니다.`,
+    ok: all ? '비우기' : '삭제', danger: true });
+  if (!ok) return;
+  const undo = removeEntries(tab, list.map((r) => r.id));
+  toast(`${list.length}개를 지웠습니다.`, 'ok', 6000, { label: '되돌리기', onclick: undo });
 }
 
 // ---------------------------------------------------------------- view
@@ -248,6 +307,10 @@ function rulesCard() {
     h('div', { class: 'rule-grid', style: { marginTop: '12px' } },
       h('div', { class: 'rule' }, h('div', { class: 'note' }, '전체 가중치 배율'), num('scale', { step: 0.05, min: 0.05, max: 5, width: '100%' }),
         h('div', { class: 'note', style: { marginTop: '4px' } }, '뽑은 뒤 모든 가중치에 곱합니다 (예: 0.7).')),
+      h('div', { class: 'rule wide' }, h('div', { class: 'note' }, '선호 작가 반영'), select('favor', FAVOR_LEVELS),
+        h('div', { class: 'note', style: { marginTop: '4px' } }, Number(c.favor) > 1
+          ? `대결 점수가 높은 작가가 더 자주 뽑힙니다 (1위 ×${c.favor}, 꼴찌 ×${Math.round(100 / c.favor) / 100}, 점수 없는 작가 ×1). 고정 작가는 상관없이 항상 들어갑니다.`
+          : '끄면 후보 작가가 모두 같은 확률로 뽑힙니다.')),
       h('div', { class: 'rule wide' }, h('div', { class: 'note' }, '출력 틀 ({artist} 자리에 작가 믹스)'),
         h('textarea', { class: 'textarea', rows: 2, value: c.template, style: { minHeight: '56px' },
           onchange: (e) => { c.template = e.currentTarget.value; persist(); render(); } }))));
@@ -271,6 +334,7 @@ function resultCard(r, { fav = false } = {}) {
       h('button', { class: 'btn primary sm', onclick: () => copyText(text, '프롬프트를 복사했습니다.') }, icon('copy'), '복사'),
       h('button', { class: `btn sm ${isFav(r) ? 'fav-on' : ''}`, 'aria-label': '즐겨찾기', onclick: () => toggleFav(r) }, icon('star')),
       fav ? null : h('button', { class: 'btn sm', 'aria-label': '다시 뽑기', onclick: () => reroll(r) }, icon('refresh')),
+      h('button', { class: 'btn sm danger-text', 'aria-label': view.tab === 'favorites' ? '즐겨찾기에서 빼기' : '삭제', onclick: () => deleteOne(r) }, icon('trash')),
       h('span', { class: 'spacer' }),
       h('button', { class: 'btn sm', onclick: () => drawImages([r]) }, icon('brush'), '그리기')));
 }
@@ -295,18 +359,13 @@ function resultsSection() {
         list.every((r) => selected.has(r.id)) ? '선택 해제' : '모두 선택'),
       chosen.length ? h('button', { class: 'btn ghost sm', onclick: () => copyText(chosen.map(textOf).join('\n\n'), `${chosen.length}개를 복사했습니다.`) }, icon('copy'), `선택 ${chosen.length}개 복사`) : null,
       chosen.length ? h('button', { class: 'btn primary sm', onclick: () => drawImages(chosen) }, icon('brush'), `선택 ${chosen.length}개 그리기`) : null,
-      view.tab === 'history' && data.history.length ? h('button', { class: 'btn ghost sm danger-text', onclick: clearHistory }, icon('trash'), '기록 지우기') : null) : null,
+      chosen.length ? h('button', { class: 'btn ghost sm danger-text', onclick: () => deleteMany(view.tab, chosen) }, icon('trash'), `선택 ${chosen.length}개 삭제`)
+        : h('button', { class: 'btn ghost sm danger-text', onclick: () => deleteMany(view.tab, list, { all: true }) }, icon('trash'),
+          view.tab === 'favorites' ? '즐겨찾기 비우기' : view.tab === 'history' ? '기록 비우기' : '결과 비우기')) : null,
     list.length ? h('div', { class: 'gresults' }, list.map((r) => resultCard(r, { fav: view.tab !== 'results' })))
       : h('div', { class: 'card' }, emptyState({ iconName: view.tab === 'favorites' ? 'star' : 'dice',
         title: view.tab === 'favorites' ? '즐겨찾기가 없습니다' : view.tab === 'history' ? '아직 뽑은 기록이 없습니다' : '뽑기를 눌러 보세요',
         text: view.tab === 'favorites' ? '결과의 ☆를 누르면 여기에 모입니다.' : '규칙대로 작가 믹스를 만들어 여기에 보여 줍니다. 누르면 복사됩니다.' })));
-}
-
-async function clearHistory() {
-  if (!(await confirmDialog({ title: '기록 지우기', text: '뽑은 기록을 모두 지웁니다. 즐겨찾기는 남습니다.', ok: '지우기', danger: true }))) return;
-  data.history = [];
-  persist();
-  render();
 }
 
 function render() {
@@ -330,6 +389,8 @@ export default {
         favorites: Array.isArray(saved.favorites) ? saved.favorites : [],
         history: Array.isArray(saved.history) ? saved.history : [],
       };
+      if (Array.isArray(saved.results)) results = saved.results.slice(0, RESULTS_LIMIT);
+      scoreCache = null;
     } catch (error) {
       toast(error.message, 'error');
     }
@@ -338,7 +399,8 @@ export default {
   unmount() {
     if (saveTimer) {
       clearTimeout(saveTimer);
-      post('/api/gacha/save', { data }).catch(() => {});
+      saveTimer = null;
+      post('/api/gacha/save', { data: { ...data, results } }).catch(() => {});
     }
   },
 };

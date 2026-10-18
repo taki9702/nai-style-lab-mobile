@@ -1,6 +1,7 @@
 // 작가 · 조합 만들기 — register artists, then roll random combos that will find their place in the arena.
 import { get, post } from '../api.js';
 import { h, morph, limits, icon, toast, fmt, confirmDialog, promptDialog, shortTag, pickSelect, selectionKeys, pageHead, card, touch } from '../ui.js';
+import { FAVOR_LEVELS } from '../backend/core.js';
 
 let root, app, artists = [];
 // addText / customText / countDraft: what is typed in the artist and combo boxes and "만들 개수" (the count until a start saves it).
@@ -79,11 +80,12 @@ function render() {
           rule('가중치 범위', pair(ruleInput('global_min_w', 0.1), ruleInput('global_max_w', 0.1))),
           rule('시드', h('div', { class: 'input-group' }, ruleInput('seed', null),
             h('button', { class: 'btn sm', onclick: () => saveRule('seed', String(Math.floor(Math.random() * app.meta.max_seed))) }, icon('refresh'), '무작위')),
-          { gridColumn: 'span 2' })),
+          { gridColumn: 'span 2' }),
+          rule('선호 작가 반영', favorSelect(), { gridColumn: 'span 2' })),
         h('div', { class: 'row' }, h('span', { class: 'field-label' }, '만들 개수'), count, h('span', { class: 'spacer' }),
           h('button', { class: 'btn primary lg', disabled: working, onclick: () => generate(Number(view.countDraft ?? settings.gen_count)) }, icon('zap'), working ? '생성 중…' : '만들기')),
         h('p', { class: 'note' },
-          '작가 수와 가중치 범위는 진화와 다듬기에도 그대로 적용됩니다.')),
+          '작가 수와 가중치 범위는 진화와 다듬기에도 그대로 적용됩니다. 선호 작가 반영은 여기와 특정 조합의 __random__ 자리에만 쓰입니다(진화는 원래대로 ×2).')),
       card({ icon: 'pen', tone: 'mint', title: '특정 조합 만들기', desc: '적은 작가와 가중치 그대로 조합을 만들고, 바로 그림을 생성합니다.' },
         h('textarea', { class: 'textarea', rows: 3, value: view.customText, oninput: (e) => { view.customText = e.currentTarget.value; },
           placeholder: '1.2::artist:rurudo ::, __random__, __random__\n__random__: 등록된 작가 중 무작위' }),
@@ -102,6 +104,21 @@ function rule(label, value, style) {
 }
 
 const pair = (a, b) => h('div', { class: 'range-pair' }, a, h('span', {}, '~'), b);
+
+// 선호 작가 반영: artists with a higher 점수 are drawn more often (the top one ×N, the bottom one ×1/N, no score yet ×1).
+function favorSelect() {
+  const value = Number(app.settings.favor_boost) || 1;
+  const scored = artists.filter((a) => a.combos).length;
+  const levels = FAVOR_LEVELS.some(([v]) => v === value) ? FAVOR_LEVELS : [...FAVOR_LEVELS, [value, `×${value}`]];
+  return [
+    h('select', { class: 'select', 'aria-label': '선호 작가 반영', onchange: (e) => saveRule('favor_boost', Number(e.currentTarget.value)) },
+      levels.map(([v, label]) => h('option', { value: v, selected: v === value }, label))),
+    h('div', { class: 'note', style: { marginTop: '6px' } }, value > 1
+      ? `점수 1위 작가는 ×${value}, 꼴찌는 ×${fmtBoost(1 / value)} 확률로 뽑힙니다. 점수가 없는 작가는 그대로(×1)입니다. 지금 점수가 있는 작가 ${fmt(scored)}명.`
+      : '끄면 모든 작가가 같은 확률입니다. 켜면 대결 결과로 정해진 점수가 높은 작가가 더 자주 뽑힙니다.'),
+  ];
+}
+const fmtBoost = (x) => String(Math.round(x * 100) / 100);
 
 // The combo rules and the seed are edited here, where combos are made: saved when the field is left (or Enter);
 // a refused value is shown in the error toast and the field goes back to what is saved. step null: the seed

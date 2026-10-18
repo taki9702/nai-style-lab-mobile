@@ -1,7 +1,7 @@
 // 그림체 — every combo, active and set aside. Browse, compare, fix Elo, revive or delete.
 import { get, post } from '../api.js';
 import { h, morph, icon, toast, pickSelect, selectionKeys, arrowTarget, pageHead, comboTile, comboPreview, previewPage, reviveCombos, removeCombos,
-  confirmDialog, fmt, emptyState, galleryList, galleryToolbar } from '../ui.js';
+  confirmDialog, fmt, emptyState, galleryList, galleryToolbar, isMobile, pushOverlay } from '../ui.js';
 
 let root, app, data = { active: [], excluded: [] }, barHost = null;
 const view = { tiers: new Set(), sort: 'elo-desc', selected: new Set(), focus: null, anchor: null };
@@ -24,11 +24,44 @@ function selectionChanged() {
   render();
 }
 
-const tile = (c) => comboTile(c, { cls: view.selected.has(c.id) ? 'selected' : '', onclick: (e) => select(c.id, e),
-  check: { on: view.selected.has(c.id), toggle: () => select(c.id, { ctrlKey: true }) } });
+// On a phone, picking several and looking at one are kept apart: a tap on a tile opens it (the sheet), while the
+// checkbox — or holding a finger on a tile — picks it without opening anything. Once some are picked
+// (선택 모드), every tap picks or unpicks, until 선택 해제 or Android back.
+const picking = () => isMobile() && view.selected.size > 0 && !view.focus;
+
+function check(id) {
+  if (!isMobile()) return select(id, { ctrlKey: true });
+  if (view.focus) { view.selected.clear(); view.focus = null; }  // from the sheet's one pick to a fresh multi-pick
+  view.selected.has(id) ? view.selected.delete(id) : view.selected.add(id);
+  view.anchor = id;
+  render();
+}
+
+function tap(id, event) {
+  if (!isMobile()) return select(id, event);
+  if (picking()) return check(id);
+  view.selected = new Set([id]);
+  view.anchor = id;
+  view.focus = id;
+  render();
+}
+
+// Android back leaves 선택 모드 (registered while it lasts).
+let releaseBack = null;
+function syncBack() {
+  if (picking() && !releaseBack) {
+    releaseBack = pushOverlay(() => { releaseBack = null; view.selected.clear(); render(); });
+  } else if (!picking() && releaseBack) {
+    releaseBack();
+    releaseBack = null;
+  }
+}
+
+const tile = (c) => comboTile(c, { cls: view.selected.has(c.id) ? 'selected' : '', onclick: (e) => tap(c.id, e),
+  onlong: () => check(c.id), check: { on: view.selected.has(c.id), toggle: () => check(c.id) } });
 
 function detail() {
-  return comboPreview(all().find((x) => x.id === view.focus), app, () => { view.selected.clear(); view.focus = null; render(); });
+  return comboPreview(picking() ? null : all().find((x) => x.id === view.focus), app, () => { view.selected.clear(); view.focus = null; render(); });
 }
 
 // Shown while any are selected; it floats over the page, so it lives in its own host on <body>.
@@ -38,6 +71,8 @@ function selectionBar() {
   const outs = all().filter((c) => view.selected.has(c.id) && c.excluded).map((c) => c.id);
   return h('div', { class: 'selection-bar' },
     h('span', { class: 'count' }, `${ids.length}개 선택`),
+    picking() && ids.length < visible().length
+      ? h('button', { class: 'btn sm ghost', onclick: () => { view.selected = new Set(visible().map((c) => c.id)); render(); } }, '모두 선택') : null,
     outs.length ? h('button', { class: 'btn sm', onclick: () => revive(outs) }, icon('refresh'), `부활 ${outs.length}`) : null,
     h('button', { class: 'btn sm danger', onclick: () => remove(ids) }, icon('trash'), '삭제'),
     h('button', { class: 'btn sm ghost', onclick: () => { view.selected.clear(); view.focus = null; render(); } }, '선택 해제'));
@@ -51,7 +86,8 @@ function render() {
   const toolbar = galleryToolbar(view, render);
   toolbar.style.marginBottom = '0';
   morph(root, previewPage(
-    pageHead({ title: '그림체', desc: `전체 ${fmt(data.active.length)} · 평가중 ${fmt(judging)} · 탈락 ${fmt(failed)} · 제외 ${fmt(dropped)}`,
+    pageHead({ title: '그림체', desc: `전체 ${fmt(data.active.length)} · 평가중 ${fmt(judging)} · 탈락 ${fmt(failed)} · 제외 ${fmt(dropped)}`
+        + (isMobile() ? ' · 체크하거나 길게 눌러 여러 개 선택' : ''),
       keys: [[['←', '→', '↑', '↓'], '선택 이동'], [['Delete'], '삭제'], [['Esc'], '선택 해제'], [['Ctrl', 'A'], '모두 선택'],
         [[], 'Shift/Ctrl 클릭 · 체크로 여러 개 선택']],
       // The line under the description: sort and filters on the left, the purge buttons on the right.
@@ -59,10 +95,11 @@ function render() {
         h('button', { class: 'btn danger', disabled: !failed, 'aria-label': '탈락 전부 삭제', onclick: () => purge('탈락', failed) }, icon('trash'), '탈락'),
         h('button', { class: 'btn danger', disabled: !dropped, 'aria-label': '제외 전부 삭제', onclick: () => purge('제외', dropped) }, icon('trash'), '제외')) }),
     null,
-  list.length ? h('div', { class: 'gallery cols-8' }, list.map(tile))
+  list.length ? h('div', { class: `gallery cols-8 ${picking() ? 'picking' : ''}` }, list.map(tile))
     : emptyState({ iconName: 'grid', title: '보여 줄 그림체가 없습니다', text: '필터를 바꾸거나 작가 · 조합 만들기에서 새 조합을 만들어 보세요.' }),
   detail()));
   morph(barHost, selectionBar());
+  syncBack();
 }
 
 async function load() {
@@ -124,5 +161,7 @@ export default {
   unmount() {
     barHost?.remove();
     barHost = null;
+    releaseBack?.();
+    releaseBack = null;
   },
 };

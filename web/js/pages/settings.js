@@ -195,14 +195,14 @@ async function installUpdate() {
 function data() {
   return section('folder', 'mint', '데이터', '조합 · 그림 · 순위 · 진화 기록 · 작가 · 설정 · 뽑기 기록이 이 폰의 앱 안에 저장됩니다.',
     h('div', { class: 'row wrap' },
-      h('button', { class: 'btn', disabled: exporting, onclick: exportData }, icon('download'), exporting ? `내보내는 중 ${exporting}` : '데이터 내보내기'),
-      h('button', { class: 'btn', disabled: Boolean(exporting), onclick: importData }, icon('upload'), '데이터 불러오기'),
+      h('button', { class: 'btn', disabled: Boolean(exporting || importing), onclick: exportData }, icon('download'), exporting ? `내보내는 중 ${exporting}` : '데이터 내보내기'),
+      h('button', { class: 'btn', disabled: Boolean(exporting || importing), onclick: importData }, icon('upload'), importing ? `불러오는 중 ${importing}` : '데이터 불러오기'),
       exported ? h('button', { class: 'btn ghost', onclick: () => app.act(post('/api/data/share-export')) }, icon('share'), '내보낸 파일 공유') : null),
     h('p', { class: 'note' },
       '내보내기는 모든 데이터를 zip 하나로 묶어 다운로드 폴더에 저장합니다. PC용 NAI Style Lab의 내보내기 zip과 같은 형식이라 PC와 폰 사이에서 그대로 옮길 수 있습니다. 불러오면 지금의 데이터는 모두 그 파일의 내용으로 바뀝니다.'));
 }
 
-let exporting = null, exported = false;
+let exporting = null, importing = null, exported = false;
 
 async function exportData() {
   exporting = '…';
@@ -225,13 +225,13 @@ async function importData() {
 
 지금의 조합·이미지·순위·진화·작가·설정이 이 파일의 내용으로 바뀝니다. 백업을 남기지 않으니, 필요하면 먼저 내보내기 해 두세요. 파일에 API 키가 들어 있으면 그 키로 바뀝니다.` });
   if (!ok) return;
-  exporting = '불러오는 중';
+  importing = '…';
   render();
   try {
-    const result = await app.act(post('/api/data/import', { file, onProgress: (done, total) => { exporting = `불러오는 중 ${done}/${total}`; render(); } }));
+    const result = await app.act(post('/api/data/import', { file, onProgress: (done, total) => { importing = `${done}/${total}`; render(); } }));
     toast(`데이터를 불러왔습니다. 조합 ${fmt(result.combos)}개, 이미지 ${fmt(result.images)}장.`, 'ok');
   } catch { /* shown */ } finally {
-    exporting = null;
+    importing = null;
     chars = null;
     render();
   }

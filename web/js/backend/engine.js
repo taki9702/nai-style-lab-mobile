@@ -28,12 +28,13 @@ export const SETTING_DEFAULTS = {
   character_negative: [],
   arena_mode: 'auto', arena_blind: false,
   prompt_checked: false, artists_checked: false,
+  favor_boost: 1,  // 선호 작가 반영 in 무작위 조합 (1 = off, as the PC app)
 };
 const SETTING_TYPES = {
   model: 'str', size: 'str', sampler: 'str', steps: 'int', cfg: 'float', cfg_rescale: 'float', delay: 'float', seed: 'str',
   global_min_w: 'float', global_max_w: 'float', gen_min: 'int', gen_max: 'int', gen_count: 'int', evo_count: 'int',
   improve_variants: 'int', base_prompt: 'str', character_prompt: 'list', negative: 'str', character_negative: 'list',
-  arena_mode: 'str', arena_blind: 'bool', prompt_checked: 'bool', artists_checked: 'bool',
+  arena_mode: 'str', arena_blind: 'bool', prompt_checked: 'bool', artists_checked: 'bool', favor_boost: 'float',
 };
 const PROMPT_KEYS = ['base_prompt', 'character_prompt', 'negative', 'character_negative'];
 export const SETTING_RANGES = {
@@ -41,7 +42,7 @@ export const SETTING_RANGES = {
   delay: ['생성 간 대기', 0, 30], global_min_w: ['최소 가중치', 0.1, 3], global_max_w: ['최대 가중치', 0.1, 3],
   gen_min: ['조합당 최소 작가 수', 1, 20], gen_max: ['조합당 최대 작가 수', 1, 20],
   gen_count: ['무작위 조합 기본 개수', 1, 200], evo_count: ['진화 조합 수', 1, 60],
-  improve_variants: ['다듬기 라운드당 변형', 2, 12],
+  improve_variants: ['다듬기 라운드당 변형', 2, 12], favor_boost: ['선호 작가 반영', 1, 4],
 };
 const SETTING_CHOICES = { model: core.MODELS, size: Object.keys(core.SIZE_PRESETS), sampler: core.SAMPLERS, arena_mode: ARENA_MODES };
 
@@ -474,10 +475,11 @@ export class Engine {
     if (tags.length < s.gen_min) throw new UserError(`작가를 최소 ${s.gen_min}명 이상 등록해 주세요.`);
     const settings = this._genSettings();
     const seen = new Set([...this.combos, ...this.retired].map((c) => c.style));
+    const favor = this._favorWeights(tags, s);
     this.save();
     const draw = () => {
       const size = core.rnd.randint(s.gen_min, Math.min(s.gen_max, tags.length));
-      const picked = core.rnd.sample(tags, size);
+      const picked = favor ? core.rnd.weightedSample(tags, favor, size) : core.rnd.sample(tags, size);
       const weights = picked.map(() => core.clampWeight(core.rnd.uniform(s.global_min_w, s.global_max_w), s.global_min_w, s.global_max_w));
       return [core.styleFromPairs(picked.map((t, i) => [weights[i], t])), new Set(picked)];
     };
@@ -489,6 +491,14 @@ export class Engine {
       const made = await this._drawAndRender(job, settings, count, draw, keep, seen);
       this._event('ok', `새 조합 ${made}개를 만들었습니다. 대결에서 자리를 찾아 주세요.`);
     });
+  }
+
+  // 선호 작가 반영: one draw weight per tag, higher for a higher 점수 (null when off: all alike, as the PC app).
+  _favorWeights(tags, s) {
+    if (!(s.favor_boost > 1)) return null;
+    const scores = Object.fromEntries(Object.entries(core.artistScores([...this.combos, ...this.retired])).map(([t, [sc]]) => [t, sc]));
+    const pref = core.artistPreference(scores, tags, s.favor_boost);
+    return tags.map((t) => pref[t]);
   }
 
   async startCustom(text, count = 1) {
@@ -512,8 +522,9 @@ export class Engine {
     const settings = this._genSettings();
     this.save();
     const low = s.global_min_w, high = s.global_max_w;
+    const favor = this._favorWeights(pool, s);
     const draw = () => {
-      const picked = core.rnd.sample(pool, slots.length);
+      const picked = favor ? core.rnd.weightedSample(pool, favor, slots.length) : core.rnd.sample(pool, slots.length);
       const weights = slots.map((w) => (w == null ? core.clampWeight(core.rnd.uniform(low, high), low, high) : w));
       const pairs = [...fixed, ...picked.map((t, i) => [weights[i], t])];
       return [core.styleFromPairs(pairs), new Set(pairs.map(([, t]) => t))];

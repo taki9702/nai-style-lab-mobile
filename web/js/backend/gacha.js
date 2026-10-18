@@ -13,6 +13,7 @@ export const DEFAULT_CONFIG = {
   template: '{artist}',
   unique: true,      // never the same mix twice (this batch and the saved history)
   batch: 5,
+  favor: 1,          // 선호 작가 반영: artists with a higher 점수 drawn more often (1 = off)
 };
 
 // Pool entries: { tag, state: 'free' | 'pin' | 'off', w: null | number (pinned: fixed weight), w0: weight it came with, pos: 'any' | 'first' | 'last' }
@@ -58,14 +59,15 @@ export function mixText(pairs, cfg) {
   return [style, template].filter(Boolean).join(', ');
 }
 
-// One mix: [[weight, tag], ...] in its final order.
-export function drawMix(pool, cfg) {
+// One mix: [[weight, tag], ...] in its final order. pref: tag -> draw weight for the free artists (선호 작가 반영), or null.
+export function drawMix(pool, cfg, pref = null) {
   const pinned = pool.filter((a) => a.state === 'pin');
   const free = pool.filter((a) => (a.state || 'free') === 'free');
   const nMin = Math.max(cfg.countMin, pinned.length);
   const nMax = Math.max(nMin, Math.min(Math.max(cfg.countMax, cfg.countMin), pinned.length + free.length));
   const n = Math.min(rnd.randint(nMin, nMax), pinned.length + free.length);
-  const picked = [...pinned, ...rnd.sample(free, Math.max(0, n - pinned.length))];
+  const k = Math.max(0, n - pinned.length);
+  const picked = [...pinned, ...(pref ? rnd.weightedSample(free, free.map((a) => pref[a.tag] ?? 1), k) : rnd.sample(free, k))];
   const step = cfg.step > 0 ? cfg.step : 0.1;
   const d = decimals(step);
   const weightOf = (a) => {
@@ -96,13 +98,13 @@ export function drawMix(pool, cfg) {
 }
 
 // A batch of mixes, each new (not in ``avoid``: texts already drawn). Fewer when the pool cannot make more.
-export function drawBatch(pool, cfg, count, avoid = new Set()) {
+export function drawBatch(pool, cfg, count, avoid = new Set(), pref = null) {
   const out = [];
   const seen = new Set(cfg.unique ? avoid : []);
   for (let i = 0; i < count; i++) {
     let mix = null;
     for (let t = 0; t < 40; t++) {
-      const pairs = drawMix(pool, cfg);
+      const pairs = drawMix(pool, cfg, pref);
       if (!pairs.length) break;
       const key = pairs.map(([w, tag]) => `${w}|${tag}`).join(',');
       if (!seen.has(key)) {

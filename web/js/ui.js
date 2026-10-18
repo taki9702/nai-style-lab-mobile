@@ -222,7 +222,8 @@ export function icon(name, extra = '') {
 
 // ---------------------------------------------------------------- toasts
 const TOAST_ICON = { ok: 'check', info: 'info', warn: 'alert', error: 'alert' };
-export function toast(text, level = 'info', ms) {
+// action: { label, onclick } adds a button (되돌리기) before the close button.
+export function toast(text, level = 'info', ms, action = null) {
   const root = document.getElementById('toasts');
   const close = () => {
     el.classList.add('leaving');
@@ -231,6 +232,7 @@ export function toast(text, level = 'info', ms) {
   const el = h('div', { class: `toast ${level}` },
     h('div', { class: 'ico' }, icon(TOAST_ICON[level] || 'info')),
     h('div', { class: 'body' }, text),
+    action ? h('button', { class: 'btn sm toast-action', onclick: (e) => { e.stopPropagation(); close(); action.onclick(); } }, action.label) : null,
     h('button', { class: 'x', 'aria-label': '닫기', onclick: close }, icon('x', 'width="14" height="14"')));
   root.append(el);
   while (root.children.length > (isMobile() ? 3 : 5)) root.firstElementChild.remove();
@@ -668,13 +670,46 @@ export function card({ icon: iconName, tone = '', title, desc, cls = '', style }
 // right) and 최종 (bottom left), and Elo · record under it. ``badge`` replaces the top-left badge (진화 shows
 // 생존/탈락 there), ``extra`` adds to the caption, ``cls`` marks the tile (selected, out).
 // check: { on, toggle } adds a checkbox at the bottom right, so the mouse alone can pick several (그림체).
-export function comboTile(combo, { onclick, cls = '', badge, extra, check } = {}) {
-  return h('div', { class: `tile ${combo.excluded ? 'out' : ''} ${cls}`, key: combo.id, onclick },  // set aside (탈락 / 제외): dimmed
+// onlong: a finger held on the tile (그림체: start picking several on a phone).
+export function comboTile(combo, { onclick, cls = '', badge, extra, check, onlong } = {}) {
+  const click = (e) => {
+    if (e.currentTarget.__lpFired) { e.currentTarget.__lpFired = false; return; }  // the click that ends a long press
+    onclick?.(e);
+  };
+  return h('div', { class: `tile ${combo.excluded ? 'out' : ''} ${cls}`, key: combo.id, onclick: click, ...(onlong ? longPressProps(onlong) : {}) },  // set aside (탈락 / 제외): dimmed
     art(combo, { corners: [['tl', badge ?? tierChip(combo)],
       ['tr', combo.rank ? h('span', { class: 'badge glass num' }, `#${combo.rank}`) : null], ['bl', finalBadge(combo)],
       ['br', check ? h('button', { class: `tile-check ${check.on ? 'on' : ''}`, 'aria-label': '선택', 'aria-pressed': String(check.on),
         onclick: (e) => { e.stopPropagation(); check.toggle(); } }, icon('check', 'width="14" height="14"')) : null]] }),
     h('div', { class: 'caption' }, h('span', { class: 'elo num' }, eloShown(combo.elo)), h('span', { class: 'meta num' }, record(combo)), extra));
+}
+
+// A finger held still on an element for ~0.45 s runs fn (and marks the element so its next click is ignored).
+// Moving the finger (a scroll) cancels it. The mouse never long-presses: it has Ctrl/Shift.
+export function longPressProps(fn, ms = 450) {
+  const stop = (e) => { clearTimeout(e.currentTarget.__lp); e.currentTarget.__lpAt = null; };
+  return {
+    onpointerdown: (e) => {
+      if (e.pointerType === 'mouse') return;
+      const el = e.currentTarget;
+      clearTimeout(el.__lp);
+      el.__lpFired = false;
+      el.__lpAt = [e.clientX, e.clientY];
+      el.__lp = setTimeout(() => {
+        el.__lpAt = null;
+        el.__lpFired = true;
+        try { navigator.vibrate?.(15); } catch { /* no vibration */ }
+        fn();
+      }, ms);
+    },
+    onpointermove: (e) => {
+      const at = e.currentTarget.__lpAt;
+      if (at && Math.hypot(e.clientX - at[0], e.clientY - at[1]) > 10) stop(e);
+    },
+    onpointerup: stop,
+    onpointercancel: stop,
+    oncontextmenu: (e) => { if (e.currentTarget.__lpFired || e.currentTarget.__lpAt) e.preventDefault(); },
+  };
 }
 
 // A page with the preview column (그림체 · 진화 · 다듬기). On a phone the preview is a sheet over the list instead,

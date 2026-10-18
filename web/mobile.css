@@ -312,3 +312,13 @@ button { touch-action: manipulation; }
 .compare-actions .btn { height: 52px; font-size: 15px; }
 .compare-hint { text-align: center; font-size: 11.5px; color: var(--text-3); padding: 0 10px calc(var(--safe-b) + 10px); flex: none; }
 .compare-empty { flex: 1; display: grid; place-items: center; }
+
+/* 그림체: a bigger target for the checkbox, and 선택 모드 (every tap picks) */
+@media (max-width: 899px) {
+  .tile .tile-check { position: relative; width: 28px; height: 28px; }
+  .tile .tile-check::after { content: ''; position: absolute; inset: -12px; }
+  .tile { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+  .gallery.picking .tile:not(.selected) .art img { opacity: 0.82; }
+}
+.toast .toast-action { flex: none; align-self: center; }
+.gresult-actions .danger-text svg { width: 15px; height: 15px; }
