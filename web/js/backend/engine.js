@@ -128,6 +128,7 @@ export class Engine {
     this.saveTimer = null;
     this.saving = Promise.resolve();
     this.onJob = null;  // (running) => void, for keeping the screen on
+    this.onProgress = null;  // () => void, after each image (the background notification)
   }
 
   async load() {
@@ -444,7 +445,7 @@ export class Engine {
       }
       seen.add(style);
       const name = await this._render(job, settings, style, settings.seed);
-      job.done += 1;
+      job.done += 1; this.onProgress?.();
       if (name) {
         made += 1;
         keep(style, name, info);
@@ -601,7 +602,7 @@ export class Engine {
         const combo = this.find(id);
         if (!combo) continue;
         const name = await this._render(job, settings, combo.style, settings.seed);
-        job.done += 1;
+        job.done += 1; this.onProgress?.();
         if (!name) continue;
         made += 1;
         const old = combo.image_file;
@@ -1429,7 +1430,7 @@ export class Engine {
         for (const [role, combo] of roles) {
           if (this.stopped) break;
           const name = await this._render(job, settings, combo.style, final.seed);
-          job.done += 1;
+          job.done += 1; this.onProgress?.();
           final[role] = name;
           if (same) final.champion = name;
           this.save();

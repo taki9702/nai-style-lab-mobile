@@ -147,6 +147,28 @@ export async function styleStatusBar() {
   } catch { /* optional plugin */ }
 }
 
+// Background generation (Android): a foreground service with a progress notification keeps the app running
+// while another app is on screen. Quietly does nothing in a browser or if the phone refuses it.
+export async function backgroundWork(on, title = '', text = '') {
+  if (!native) return;
+  try { await ScreenAwake.background({ on: Boolean(on), title, text }); } catch { /* the app then only runs while open */ }
+}
+export async function backgroundNotice(title, text) {
+  if (!native) return;
+  try { await ScreenAwake.notice({ title, text }); } catch { /* no notification permission */ }
+}
+// null in a browser; { unrestricted } on the phone (ask: open the system prompt to allow background running).
+export async function batteryState(ask = false) {
+  if (!native) return null;
+  try { return await ScreenAwake.battery({ ask }); } catch { return null; }
+}
+let asked = false;
+export async function askNotifications() {
+  if (!native || asked) return;
+  asked = true;
+  try { await ScreenAwake.askNotifications(); } catch { /* older app shell */ }
+}
+
 // Keep the screen on while images are being made (generation would slow or stop with the screen off).
 let lock = null;
 export async function keepAwake(on) {

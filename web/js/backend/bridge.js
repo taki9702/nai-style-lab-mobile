@@ -4,7 +4,7 @@ import { Engine, SETTING_RANGES, UserError } from './engine.js';
 import { openStorage } from './storage.js';
 import { Updater } from './updater.js';
 import { VERSION } from '../version.js';
-import { native, Filesystem, toBase64, shareFile, openExternal, downloadBlob, keepAwake, onPause } from './platform.js';
+import { native, Filesystem, toBase64, shareFile, openExternal, downloadBlob, keepAwake, onPause, backgroundWork, backgroundNotice, askNotifications } from './platform.js';
 
 class NotFound extends Error {}
 
@@ -58,7 +58,27 @@ export async function createBridge() {
     if (error instanceof core.NewerDataError) throw new Error('이 데이터는 더 새 버전의 앱에서 저장되었습니다. 앱을 업데이트해 주세요.');
     throw error;
   }
-  engine.onJob = (running) => keepAwake(running);
+  // While a job runs: screen kept on, and a notification (foreground service) so it goes on in the background too.
+  let lastNote = 0;
+  const progressText = (j) => `${j.done} / ${j.total}장${j.failures ? ` · 실패 ${j.failures}` : ''} · 눌러서 앱 열기`;
+  engine.onProgress = () => {
+    const j = engine.job;
+    if (!j?.running || Date.now() - lastNote < 1500) return;
+    lastNote = Date.now();
+    backgroundWork(true, j.label, progressText(j));
+  };
+  engine.onJob = (running) => {
+    keepAwake(running);
+    const j = engine.job;
+    if (running && j) {
+      askNotifications();
+      lastNote = Date.now();
+      backgroundWork(true, j.label, progressText(j));
+    } else {
+      backgroundWork(false);
+      if (j && document.hidden && j.done) backgroundNotice(`${j.label} 완료`, `${j.done}장을 만들었습니다${j.failures ? ` (실패 ${j.failures})` : ''}. 눌러서 대결을 이어 가세요.`);
+    }
+  };
   const updater = new Updater();
   onPause(() => engine.flush());
   setTimeout(() => updater.check().catch(() => {}), 2500);

@@ -1,6 +1,7 @@
 // 설정 — everything saves as you type. The combo rules are edited on 작가 · 조합 만들기.
 import { get, post, keepDraft } from '../api.js';
 import { h, morph, limits, icon, toast, fmt, confirmDialog, promptDialog, pageHead, card, pickFile } from '../ui.js';
+import { batteryState, native } from '../backend/platform.js';
 
 // The settings themselves are app.conf (one copy for every page). showKey: the API key shown in clear.
 // chars: the character prompts being edited (empty boxes included, which the server drops on save).
@@ -192,6 +193,25 @@ async function installUpdate() {
   if (ok) await app.act(post('/api/update/install'));
 }
 
+// 백그라운드 생성: the notification keeps it going; some phones (Samsung, Xiaomi …) still stop apps under battery saving.
+let battery = null;
+async function checkBattery(ask = false) {
+  battery = await batteryState(ask);
+  render();
+}
+function background() {
+  if (!native) return null;
+  const free = battery?.unrestricted;
+  return section('zap', 'amber', '백그라운드 생성', '그림을 만드는 동안 알림에 진행 상황이 뜨고, 다른 앱을 써도 계속 만듭니다. 다 만들면 알림으로 알려 줍니다.',
+    h('div', { class: 'row wrap' },
+      h('span', { class: `badge ${free ? 'mint' : 'amber'}` }, battery == null ? '확인 중' : free ? '배터리 제한 없음' : '배터리 최적화 켜짐'),
+      free ? null : h('button', { class: 'btn', onclick: () => { checkBattery(true); setTimeout(() => checkBattery(false), 4000); } }, icon('zap'), '백그라운드 실행 허용'),
+      h('button', { class: 'btn ghost sm', onclick: () => checkBattery(false) }, icon('refresh'), '다시 확인')),
+    h('p', { class: 'note' }, free
+      ? '이 앱은 배터리 최적화에서 빠져 있어 백그라운드에서도 멈추지 않습니다.'
+      : '배터리 최적화가 켜져 있으면 폰에 따라 백그라운드에서 멈출 수 있습니다. "백그라운드 실행 허용"을 누르고 "허용"을 고르세요. 갤럭시는 설정 → 애플리케이션 → NAI Style Lab → 배터리 → "제한 없음"으로도 바꿀 수 있습니다. 알림 권한을 물으면 허용해 주세요.'));
+}
+
 function data() {
   return section('folder', 'mint', '데이터', '조합 · 그림 · 순위 · 진화 기록 · 작가 · 설정 · 뽑기 기록이 이 폰의 앱 안에 저장됩니다.',
     h('div', { class: 'row wrap' },
@@ -274,7 +294,7 @@ function render() {
   const columns = (left, right) => h('div', { class: 'grid settings-columns', style: { alignItems: 'start' } },
     h('div', { class: 'stack', style: { gap: '16px' } }, left), h('div', { class: 'stack', style: { gap: '16px' } }, right));
   const body = tab === 'prompts' ? h('div', { class: 'stack', style: { gap: '16px' } }, named(prompts(), 'prompts'), redraw())
-    : tab === 'data' ? columns([update(), data()], resets())
+    : tab === 'data' ? columns([update(), background(), data()], resets())
     : columns([named(connection(), 'connection')], generation());
   morph(root,
     pageHead({ title: '설정', desc: '바꾸면 바로 저장됩니다.',
@@ -329,6 +349,7 @@ export default {
     el.append(root);
     tab = TAB_OF[app.params.focus] ?? tab;
     render();
+    checkBattery(false);
     focusSection();
   },
   unmount() {
