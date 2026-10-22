@@ -1,6 +1,7 @@
 // 프롬프트 섞기: whole style prompts read out of NovelAI PNGs (artists, quality tags and the undesired content), mixed
 // into new ones. The scene and the character prompts are left out: they come from the app's own settings.
 import { sanitizeTag, rnd, styleFromPairs } from './core.js';
+import ARTIST_NAMES from './artist-names.js';
 
 export const DEFAULT_MIX_CONFIG = {
   srcMin: 2, srcMax: 3,       // how many pictures one mix draws from
@@ -67,7 +68,46 @@ const QUALITY_RE = /(^|\s)(masterpiece|best quality|amazing quality|great qualit
 // Undesired content that guards the drawing itself (quality, errors, marks) rather than the scene.
 const NEG_STYLE_RE = /(bad|worst|low|lowres|quality|artifact|error|blurry|blur|jpeg|watermark|signature|username|logo|text|deformed|distorted|disfigured|mutat|extra |missing|fewer|cropped|ugly|displeasing|amateur|unfinished|incomplete|sketch|3d|realistic|blender|chromatic|scan|dither|halftone|screentone|multiple views|border|letterbox|framed|censor|chibi|anatomy|anatomical|proportion|unnatural|asymmetrical|cloudy|blank|negative space|variant set|4koma|2koma|official art|artist|oekaki|toon|reference|turnaround|upscaled|vertical|banding|noise|grain|motion blur|inadequate|deficient|subpar|poor|cheesy|unsatisfactory|amputee|long neck|digits|fingers|hands|limb|legs|arms|feet|face|eyes|nipples|nsfw|lineart|simple illustration|flat color|aesthetic|abstract|retro|old|early|oldest)/i;
 
-const kindOfToken = (tag) => (tag.startsWith('artist:') ? 'artist' : QUALITY_RE.test(tag) ? 'quality' : 'scene');
+// Artist names written without "artist:" (ebora instead of artist:ebora): the Danbooru artist list (names that are
+// also general, character or copyright tags left out), plus names the caller knows (registered artists, and artists
+// written with "artist:" in any picture read in).
+export const artistKey = (tag) => String(tag || '').replace(/^artist:/, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+let builtIn = null;
+export function knownArtists(extra = []) {
+  builtIn ??= new Set(ARTIST_NAMES.split('\n'));
+  const set = new Set(builtIn);
+  for (const t of extra) { const k = artistKey(t); if (k) set.add(k); }
+  return set;
+}
+// Every artist written with "artist:" in a prompt text (to learn names used bare elsewhere).
+export const artistTagsIn = (text) => tokenize(text).filter((t) => t.tag.startsWith('artist:')).map((t) => t.tag);
+
+// Plainly scene tags, never taken for an unknown artist even in a block of artists.
+const SCENE_RE = /^(\d+\+?(girl|boy|other)s?|solo|solo focus|multiple .+|no humans|.+ (shot|view|background|focus|angle|lighting)|from .+|looking .+|(upper|lower|full) body|portrait|close-up|.+ (hair|eyes|dress|skirt|shirt|breasts|clothes|outfit)|indoors|outdoors|smile|blush|standing|sitting|lying|nsfw|sfw)$/i;
+
+function kindOfToken(tag, known) {
+  if (tag.startsWith('artist:')) return 'artist';
+  if (known && known.has(artistKey(tag))) return 'artist';
+  return QUALITY_RE.test(tag) ? 'quality' : 'scene';
+}
+// A token made an artist: written the way the arena stores artists (artist:name_with_underscores).
+function asArtist(t, guessed = false) {
+  t.raw ??= t.tag;
+  t.kind0 ??= t.kind;
+  t.kind = 'artist';
+  t.tag = sanitizeTag(t.raw) || t.raw;
+  if (guessed) t.guessed = true;
+  return t;
+}
+// Back from artist to what it was read as.
+export function unArtist(t) {
+  if (t.kind !== 'artist' || t.raw == null) return t;
+  t.tag = t.raw;
+  t.kind = t.kind0 && t.kind0 !== 'artist' ? t.kind0 : 'quality';
+  delete t.guessed;
+  return t;
+}
+export function makeArtist(t) { return asArtist(t); }
 
 // Blocks of a prompt: split where it has a blank line (how prompts are usually laid out: artists / quality / scene).
 const blocksOf = (text) => String(text || '').split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
@@ -89,15 +129,28 @@ function negativeRole(tokens) {
 
 // A NovelAI PNG's meta (novelaiMeta) → a source: its blocks with every tag's kind and state.
 // state: 'use' (goes into mixes), 'pin' (in every mix), 'off' (left out). Scene blocks start off.
-export function sourceFromMeta(meta, { name = '', thumb = null } = {}) {
+export function promptsOf(meta) {
   const caption = meta.v4_prompt?.caption;
-  const positive = caption?.base_caption ?? meta.prompt ?? '';
-  const negative = meta.v4_negative_prompt?.caption?.base_caption ?? meta.uc ?? '';
+  return { positive: caption?.base_caption ?? meta.prompt ?? '', negative: meta.v4_negative_prompt?.caption?.base_caption ?? meta.uc ?? '' };
+}
+
+export function sourceFromMeta(meta, { name = '', thumb = null, known = null } = {}) {
+  const { positive, negative } = promptsOf(meta);
+  known ??= knownArtists(artistTagsIn(positive));
   const blocks = [];
   const posBlocks = blocksOf(positive);
   for (const text of posBlocks) {
-    const tokens = tokenize(text).map((t) => ({ ...t, kind: kindOfToken(t.tag) }));
+    const tokens = tokenize(text).map((t) => {
+      const kind = kindOfToken(t.tag, known);
+      return kind === 'artist' && !t.tag.startsWith('artist:') ? asArtist({ ...t, kind: 'scene' }) : { ...t, kind };
+    });
     if (!tokens.length) continue;
+    // A block that is mostly artists: the other names in it (not look tags) are artists the list does not know yet.
+    const artists = tokens.filter((t) => t.kind === 'artist').length;
+    const others = tokens.filter((t) => t.kind === 'scene').length;
+    if (posBlocks.length > 1 && artists >= 3 && artists / (artists + others) >= 0.6) {
+      for (const t of tokens) if (t.kind === 'scene' && !SCENE_RE.test(t.tag)) asArtist(t, true);
+    }
     let role = positiveRole(tokens);
     // A prompt written as one block: sort tag by tag instead.
     if (posBlocks.length === 1) role = 'mixed';
@@ -126,7 +179,7 @@ export function sourceFromMeta(meta, { name = '', thumb = null } = {}) {
     model: String(meta.source || '').replace(/\s+[0-9A-F]{8}$/, ''), width: meta.width, height: meta.height, steps: meta.steps,
     cfg: meta.scale, cfg_rescale: meta.cfg_rescale, sampler: meta.sampler, seed: meta.seed,
   };
-  return { id: newSourceId(), name: name || '그림', thumb, ratio: 1, blocks, settings, created: Date.now() };
+  return { id: newSourceId(), name: name || '그림', thumb, ratio: 1, blocks, settings, created: Date.now(), prompt: { positive, negative } };
 }
 
 let idSeq = 0;

@@ -92,6 +92,7 @@ button { touch-action: manipulation; }
 .mixer-block { padding: 10px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
 .mixer-block.off { opacity: 0.6; }
 .mixer-block .gchips { max-height: 200px; }
+.gchip.artist { background: rgba(34, 29, 70, 0.9); border-color: var(--accent-line); color: var(--accent-2); }
 .mixer-neg summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); margin-bottom: 6px; }
 .free-grid { grid-template-columns: minmax(0, 380px) minmax(0, 1fr); }
 .free-form { position: sticky; top: 0; }

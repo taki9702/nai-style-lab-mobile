@@ -3,7 +3,7 @@
 // blocks right away and shown, so a wrong guess is fixed with a tap; results copy out or are drawn into the arena.
 import { get, post } from '../api.js';
 import { h, morph, icon, toast, copyText, pageHead, card, emptyState, confirmDialog, promptDialog, shortTag, novelaiMeta, stealthMeta, fmt, modal } from '../ui.js';
-import { DEFAULT_MIX_CONFIG, sourceFromMeta, sourceParts, drawMixtures, mixTexts, validateMix } from '../backend/mixer.js';
+import { DEFAULT_MIX_CONFIG, sourceFromMeta, sourceParts, drawMixtures, mixTexts, validateMix, knownArtists, artistTagsIn, promptsOf, makeArtist, unArtist } from '../backend/mixer.js';
 
 const HISTORY_LIMIT = 200;
 const RESULTS_LIMIT = 100;
@@ -66,10 +66,17 @@ async function addPictures() {
   if (room <= 0) return toast(`그림은 ${SOURCES_LIMIT}장까지 넣을 수 있습니다. 안 쓰는 그림을 지워 주세요.`, 'warn');
   const added = [];
   let noMeta = 0, noStyle = 0;
+  const read = [];
   for (const file of files.slice(0, room)) {
     const meta = novelaiMeta(new Uint8Array(await file.arrayBuffer())) || await stealthMeta(file).catch(() => null);
     if (!meta) { noMeta += 1; continue; }
-    const src = sourceFromMeta(meta, { name: file.name.replace(/\.png$/i, ''), thumb: await thumbOf(file) });
+    read.push([file, meta]);
+  }
+  // Names written bare (ebora for artist:ebora) are known from the artist list, the registered artists, and every
+  // artist written with "artist:" in these pictures or the ones read before.
+  const known = await knownNames(read.map(([, meta]) => promptsOf(meta).positive));
+  for (const [file, meta] of read) {
+    const src = sourceFromMeta(meta, { name: file.name.replace(/\.png$/i, ''), thumb: await thumbOf(file), known });
     const parts = sourceParts(src);
     if (!parts.artist.length && !parts.quality.length && !parts.neg.length) { noStyle += 1; continue; }
     added.push(src);
@@ -88,6 +95,13 @@ async function addPictures() {
   if (added.length > 1) render();
 }
 
+async function knownNames(texts = []) {
+  let registered = [];
+  try { registered = (await get('/api/artists')).map((a) => a.tag); } catch { /* the list alone */ }
+  const fromSources = data.sources.flatMap((s) => s.blocks.flatMap((b) => b.tokens.filter((t) => t.kind === 'artist').map((t) => t.tag)));
+  return knownArtists([...registered, ...fromSources, ...texts.flatMap(artistTagsIn)]);
+}
+
 // ---------------------------------------------------------------- editing one picture's split
 function summary(src) {
   const p = sourceParts(src);
@@ -96,12 +110,14 @@ function summary(src) {
   return `작가 ${p.artist.length} · 품질 ${p.quality.length} · 네거티브 ${p.neg.length} · 뺀 태그 ${scene}${pins ? ` · 고정 ${pins}` : ''}`;
 }
 
-function tokenChip(t, onTap) {
+function tokenChip(t, onTap, kindMode = false) {
   const state = t.state || 'use';
   const weight = Math.abs(t.w - 1) > 1e-9 ? String(t.w) : null;
-  return h('button', { class: `gchip ${state === 'use' ? 'free' : state}`, onclick: onTap },
-    state === 'pin' ? icon('pin') : state === 'off' ? icon('ban') : null,
+  const cls = kindMode ? (t.kind === 'artist' ? 'artist' : 'free') : state === 'use' ? 'free' : state;
+  return h('button', { class: `gchip ${cls}`, onclick: onTap },
+    kindMode ? (t.kind === 'artist' ? icon('users') : null) : state === 'pin' ? icon('pin') : state === 'off' ? icon('ban') : null,
     h('span', { class: 'name' }, t.kind === 'artist' ? shortTag(t.tag) : t.tag),
+    t.guessed ? h('span', { class: 'w0', title: '작가 목록에 없지만 작가 블록에 있어 작가로 본 이름' }, '?') : null,
     weight ? h('span', { class: 'w' }, weight) : null);
 }
 
@@ -110,24 +126,49 @@ async function editSource(src) {
   await modal((dialog, done) => {
     dialog.classList.add('viewer', 'mixer-editor');
     const body = h('div', { class: 'stack', style: { gap: '12px' } });
+    let mode = 'state';  // state: 넣기 · 고정 · 빼기 | kind: 작가 지정
+    const tapKind = (t) => {
+      if (t.kind === 'artist') unArtist(t);
+      else { makeArtist(t); if (t.state === 'off') t.state = 'use'; }
+    };
     const paint = () => {
+      const kindMode = mode === 'kind';
       morph(body,
-        h('p', { class: 'note' }, '태그를 누르면 넣기 → 고정(매번 들어감) → 빼기 순서로 바뀝니다. 블록 오른쪽 버튼으로 블록 전체를 넣거나 뺍니다.'),
+        h('div', { class: 'segmented' }, [['state', '넣기 · 고정 · 빼기'], ['kind', '작가 지정']].map(([m, label]) =>
+          h('button', { class: mode === m ? 'on' : '', onclick: () => { mode = m; paint(); } }, label))),
+        h('p', { class: 'note' }, kindMode
+          ? '작가인 태그를 누르면 작가로 바뀌고(artist:이름으로 씀), 한 번 더 누르면 원래대로 돌아갑니다. ?는 작가 목록에 없지만 작가 블록에 있어 작가로 본 이름입니다.'
+          : '태그를 누르면 넣기 → 고정(매번 들어감) → 빼기 순서로 바뀝니다. 블록 오른쪽 버튼으로 블록 전체를 넣거나 뺍니다.'),
         src.blocks.map((b, i) => {
           const [label, tone] = ROLE_LABEL[b.role] || [b.role, ''];
           const on = b.tokens.some((t) => t.state !== 'off');
-          return h('div', { class: `mixer-block ${on ? '' : 'off'}`, key: String(i) },
+          const allArtist = b.side === 'pos' && b.tokens.every((t) => t.kind === 'artist');
+          return h('div', { class: `mixer-block ${on || kindMode ? '' : 'off'}`, key: String(i) },
             h('div', { class: 'row', style: { gap: '8px' } },
               h('span', { class: `badge ${tone}` }, label),
               h('span', { class: 'note' }, `${b.tokens.length}개`),
               h('span', { class: 'spacer' }),
-              h('button', { class: 'btn ghost sm', onclick: () => {
-                for (const t of b.tokens) t.state = on ? 'off' : 'use';
-                paint();
-              } }, on ? '블록 빼기' : '블록 넣기')),
-            h('div', { class: 'gchips' }, b.tokens.map((t) => tokenChip(t, () => { t.state = STATE_NEXT[t.state || 'use']; paint(); }))));
+              kindMode
+                ? (b.side === 'pos' ? h('button', { class: 'btn ghost sm', onclick: () => {
+                  for (const t of b.tokens) allArtist ? unArtist(t) : (t.kind !== 'artist' && tapKind(t));
+                  paint();
+                } }, allArtist ? '작가 지정 풀기' : '블록 전체 작가로') : null)
+                : h('button', { class: 'btn ghost sm', onclick: () => {
+                  for (const t of b.tokens) t.state = on ? 'off' : 'use';
+                  paint();
+                } }, on ? '블록 빼기' : '블록 넣기')),
+            h('div', { class: 'gchips' }, b.tokens.map((t) => tokenChip(t, () => {
+              if (kindMode) { if (b.side === 'pos') tapKind(t); } else t.state = STATE_NEXT[t.state || 'use'];
+              paint();
+            }, kindMode && b.side === 'pos'))));
         }),
-        h('p', { class: 'note' }, summary(src)));
+        h('p', { class: 'note' }, summary(src)),
+        src.prompt ? h('button', { class: 'btn ghost sm', onclick: async () => {
+          if (!(await confirmDialog({ title: '처음부터 다시 나누기', ok: '다시 나누기', text: '이 그림에서 고친 것(넣기 · 고정 · 빼기, 작가 지정)을 버리고 처음 읽은 상태로 다시 나눕니다. 등록 작가와 다른 그림의 작가도 다시 확인합니다.' }))) return;
+          const fresh = sourceFromMeta({ prompt: src.prompt.positive, uc: src.prompt.negative }, { known: await knownNames([src.prompt.positive]) });
+          src.blocks = fresh.blocks;
+          paint();
+        } }, icon('refresh'), '처음부터 다시 나누기') : null);
     };
     paint();
     dialog.append(
