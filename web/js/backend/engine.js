@@ -74,6 +74,25 @@ function hashStr(s) {
   return h;
 }
 
+// 프롬프트 섞기: a combo's own quality tags and undesired content, or null for an ordinary combo.
+function mixOf(combo) {
+  if (!combo || !(combo.mix_extra || combo.mix_negative)) return null;
+  return { mix_extra: combo.mix_extra || '', mix_negative: combo.mix_negative || '' };
+}
+// "a, b" + "b, c" → "a, b, c": the first text's pieces, then the second's that are not in it yet.
+function mergeTagText(first, second) {
+  const out = [];
+  const seen = new Set();
+  for (const piece of `${first || ''},${second || ''}`.split(',')) {
+    const t = piece.trim();
+    if (!t || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    out.push(t);
+  }
+  return out.join(', ');
+}
+const mixKeyOf = (style, mix) => (mix ? `${style}\n+${mix.mix_extra}\n-${mix.mix_negative}` : style);
+
 function convert(kind, value) {
   if (kind === 'bool') {
     if (typeof value !== 'boolean') throw new TypeError();
@@ -314,7 +333,7 @@ export class Engine {
     const excluded = combo.excluded?.rejected ? '쳐냄' : (combo.excluded || {}).reason ?? null;  // 쳐냄: set aside from the arena (a 제외)
     const image = combo.image_file;
     return {
-      id: combo.id, style: combo.style,
+      id: combo.id, style: combo.style, mix_extra: combo.mix_extra || '', mix_negative: combo.mix_negative || '',
       pairs: core.parseStyleCombo(combo.style).map(([w, t]) => ({ w, tag: t })),
       elo: core.pyRound(combo.elo), tier, grade, provisional, rank,
       rated: core.isRated(combo) && (tier != null || !tiers.has(combo.id)), matches: combo.matches, wins: combo.wins,
@@ -396,7 +415,11 @@ export class Engine {
     throw new Error('unreachable');
   }
 
-  async _render(job, settings, style, seed) {
+  // 프롬프트 섞기 combos carry their own quality tags (mix_extra, drawn after the artists) and undesired content
+  // (mix_negative, used instead of the settings'). Other combos have neither and draw exactly as before.
+  _comboKey(c) { return mixKeyOf(c.style, mixOf(c)); }
+
+  async _render(job, settings, style, seed, mix = null) {
     if (job.renders) {
       await this._pause(settings);
       if (this.stopped) return null;
@@ -404,7 +427,8 @@ export class Engine {
     job.renders += 1;
     let png;
     try {
-      png = await this._generate(settings, style, seed);
+      png = await this._generate(mix?.mix_negative ? { ...settings, negative: mix.mix_negative } : settings,
+        mix?.mix_extra ? `${style}, ${mix.mix_extra}` : style, seed);
     } catch (error) {
       job.failures += 1;
       this._event('error', `이미지를 만들지 못했습니다: ${error?.message || error}`);
@@ -434,21 +458,21 @@ export class Engine {
     let made = 0;
     for (let i = 0; i < count; i++) {
       if (this.stopped) break;
-      let style, info, found = false;
+      let style, info, mix, found = false;
       for (let t = 0; t < DRAW_TRIES; t++) {
-        [style, info] = draw();
-        if (!seen.has(style)) { found = true; break; }
+        [style, info, mix = null] = draw();
+        if (!seen.has(mixKeyOf(style, mix))) { found = true; break; }
       }
       if (!found) {
         this._event('warn', '더 이상 새로운 조합을 만들 수 없어 만든 만큼으로 마칩니다.');
         break;
       }
-      seen.add(style);
-      const name = await this._render(job, settings, style, settings.seed);
+      seen.add(mixKeyOf(style, mix));
+      const name = await this._render(job, settings, style, settings.seed, mix);
       job.done += 1; this.onProgress?.();
       if (name) {
         made += 1;
-        keep(style, name, info);
+        keep(style, name, info, mix);
         this.save();
       }
     }
@@ -475,7 +499,7 @@ export class Engine {
     const tags = this.state.artists.map((a) => a.tag);
     if (tags.length < s.gen_min) throw new UserError(`작가를 최소 ${s.gen_min}명 이상 등록해 주세요.`);
     const settings = this._genSettings();
-    const seen = new Set([...this.combos, ...this.retired].map((c) => c.style));
+    const seen = new Set([...this.combos, ...this.retired].map((c) => this._comboKey(c)));
     const favor = this._favorWeights(tags, s);
     this.save();
     const draw = () => {
@@ -515,7 +539,7 @@ export class Engine {
     const [, low0, high0] = SETTING_RANGES.gen_count;
     if (!(low0 <= count && count <= high0)) throw new UserError(`개수는 ${low0} ~ ${high0} 사이로 입력해 주세요.`);
     const s = this.settings();
-    const seen = new Set([...this.combos, ...this.retired].map((c) => c.style));
+    const seen = new Set([...this.combos, ...this.retired].map((c) => this._comboKey(c)));
     const fixedTags = new Set(fixed.map(([, t]) => t));
     const pool = this.state.artists.map((a) => a.tag).filter((t) => !fixedTags.has(t));
     if (pool.length < slots.length) throw new UserError(`__random__ ${slots.length}자리를 채울 작가가 부족합니다 (적은 작가 말고 등록된 작가 ${pool.length}명).`);
@@ -545,7 +569,7 @@ export class Engine {
   async startStyles(styles) {
     const list = [...new Set((styles || []).map((s) => String(s).trim()).filter(Boolean))];
     if (!list.length) throw new UserError('그릴 조합이 없습니다.');
-    const seen = new Set([...this.combos, ...this.retired].map((c) => c.style));
+    const seen = new Set([...this.combos, ...this.retired].map((c) => this._comboKey(c)));
     const fresh = [];
     const fresher = new Set();
     for (const text of list) {
@@ -579,6 +603,57 @@ export class Engine {
     return { count: fresh.length, skipped: list.length - fresh.length };
   }
 
+  // 프롬프트 섞기 results: [{ style (artists), extra (quality tags), negative }], each drawn once and added like a random
+  // combo. negApply 'merge' puts the settings' 네거티브 after the mix's own (repeats dropped); 'replace' uses the mix's alone.
+  async startMixes(items, negApply = 'merge') {
+    const s = this.settings();
+    const seen = new Set([...this.combos, ...this.retired].map((c) => this._comboKey(c)));
+    const fresh = [];
+    for (const item of items || []) {
+      const pairs = this.scanArtists(String(item?.style || '')).pairs.map((p) => [p.w, p.tag]);
+      if (!pairs.length) continue;
+      const style = core.styleFromPairs(pairs);
+      const extra = String(item.extra || '').trim();
+      const own = String(item.negative || '').trim();
+      const negative = negApply === 'replace' ? own : mergeTagText(own, s.negative);
+      const mix = extra || negative ? { mix_extra: extra, mix_negative: negative } : null;
+      const key = mixKeyOf(style, mix);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fresh.push([style, mix]);
+    }
+    if (!fresh.length) throw new UserError('모두 이미 그림체 목록에 있는 조합입니다.');
+    const [, , high] = SETTING_RANGES.gen_count;
+    if (fresh.length > high) throw new UserError(`한 번에 ${high}개까지 그릴 수 있습니다.`);
+    const settings = this._genSettings();
+    this.save();
+    let i = 0;
+    const draw = () => {
+      const [style, mix] = fresh[Math.min(i, fresh.length - 1)];
+      i += 1;
+      return [style, new Set(core.artistsFromStyle(style)), mix];
+    };
+    const keep = (style, name, used, mix) => {
+      this._register([...used]);
+      for (const artist of this.state.artists) if (used.has(artist.tag)) artist.count += 1;
+      this.combos.push(this._newCombo(style, name, settings, { generation: this.selection.generation - 1, ...mix }));
+    };
+    this._startJob('custom', '섞은 프롬프트 그리기', fresh.length, async (job) => {
+      const made = await this._drawAndRender(job, settings, fresh.length, draw, keep, new Set());
+      this._event('ok', `섞은 프롬프트 ${made}개를 그렸습니다. 대결에서 자리를 찾아 주세요.`);
+    });
+    return { count: fresh.length, skipped: (items || []).length - fresh.length };
+  }
+
+  // 프롬프트 섞기 data (the pictures read in, rules, results), saved in state.json like 그림체 뽑기's.
+  mixerView() { return clone(this.state.mixer || {}); }
+
+  saveMixer(data) {
+    this.state.mixer = { ...(this.state.mixer || {}), ...clone(data || {}) };
+    this.save();
+    return {};
+  }
+
   _register(tags) {
     const registered = new Set(this.state.artists.map((a) => a.tag));
     for (const t of tags) {
@@ -601,7 +676,7 @@ export class Engine {
         if (this.stopped) break;
         const combo = this.find(id);
         if (!combo) continue;
-        const name = await this._render(job, settings, combo.style, settings.seed);
+        const name = await this._render(job, settings, combo.style, settings.seed, mixOf(combo));
         job.done += 1; this.onProgress?.();
         if (!name) continue;
         made += 1;
@@ -1194,14 +1269,14 @@ export class Engine {
     const scores = Object.fromEntries(Object.entries(core.artistScores([...this.combos, ...this.retired])).map(([t, [sc]]) => [t, sc]));
     const preference = core.artistPreference(scores, artistTags);
     const ranked = core.rankOrder(parents);
-    const seen = new Set([...this.combos, ...this.retired].map((c) => c.style));
+    const seen = new Set([...this.combos, ...this.retired].map((c) => this._comboKey(c)));
     const draw = () => {
       const [pa, pb] = core.pickParents(ranked);
       const mode = core.rnd.pick(core.BREED_MODES, core.BREED_WEIGHTS);
-      return [core.breedWeightedStyle(pa.style, pb.style, artistTags, s.gen_min, s.gen_max, s.global_min_w, s.global_max_w, mode, parentCounts, preference), null];
+      return [core.breedWeightedStyle(pa.style, pb.style, artistTags, s.gen_min, s.gen_max, s.global_min_w, s.global_max_w, mode, parentCounts, preference), null, mixOf(pa)];
     };
-    const keep = (style, name) => {
-      const combo = this._newCombo(style, name, settings);
+    const keep = (style, name, info, mix) => {
+      const combo = this._newCombo(style, name, settings, { ...mix });
       this.combos.unshift(combo);
       this.selection.candidate_ids.push(combo.id);
       this.generatingChildren = [this.selection.candidate_ids.length, count];
@@ -1313,7 +1388,7 @@ export class Engine {
       seed: imp.seed, changed: imp.changed,
       variants: imp.order.filter((k) => k in items).map((k) => ({ ...itemView(k), result: items[k].result ?? null })),
       finals: (imp.finals || []).map((f) => ({ seed: f.seed, champion: f.champion ? this.images.url(f.champion) : null, base: f.base ? this.images.url(f.base) : null })),
-      same_as_base: Boolean(base && champion && champion.style === base.style),
+      same_as_base: Boolean(base && champion && this._comboKey(champion) === this._comboKey(base)),
       suggest_final: imp.status === 'round_done' && !imp.changed && imp.jitter <= IMPROVE_JITTER_MIN,
     };
     return view;
@@ -1338,14 +1413,15 @@ export class Engine {
     const settings = { ...settings0, seed: this.state.improve.seed };
     this._startJob('improve', `다듬기 ${this.state.improve.round}라운드 생성`, count, async (job) => {
       const imp = this.state.improve;
-      const seen = new Set([...Object.keys(imp.items).map((k) => this.findAny(k).style), this.findAny(imp.champion_id).style]);
+      const seen = new Set([...Object.keys(imp.items).map((k) => this._comboKey(this.findAny(k))), this._comboKey(this.findAny(imp.champion_id))]);
       const draw = () => {
-        const pairs = core.parseStyleCombo(this.findAny(imp.champion_id).style);
-        return [core.styleFromPairs(core.jitterWeights(pairs, imp.jitter, s.global_min_w, s.global_max_w)), null];
-      };
-      const keep = (style, name) => {
         const champion = this.findAny(imp.champion_id);
-        const item = this._newCombo(style, name, settings, { elo: champion.elo, generation: champion.generation ?? 1 });
+        const pairs = core.parseStyleCombo(champion.style);
+        return [core.styleFromPairs(core.jitterWeights(pairs, imp.jitter, s.global_min_w, s.global_max_w)), null, mixOf(champion)];
+      };
+      const keep = (style, name, info, mix) => {
+        const champion = this.findAny(imp.champion_id);
+        const item = this._newCombo(style, name, settings, { elo: champion.elo, generation: champion.generation ?? 1, ...mix });
         imp.items[item.id] = item;
         const again = imp.pending.findIndex((k) => imp.items[k]?.similar);
         imp.pending.splice(again >= 0 ? again : imp.pending.length, 0, item.id);
@@ -1417,7 +1493,7 @@ export class Engine {
     const settings = this._genSettings();
     const champion = this.findAny(imp.champion_id);
     const base = this.findAny(imp.base_id);
-    const same = champion.style === base.style;
+    const same = this._comboKey(champion) === this._comboKey(base);
     const roles = same ? [['base', base]] : [['champion', champion], ['base', base]];
     const seeds = Array.from({ length: FINAL_CHECK_SEEDS }, () => core.rnd.randint(0, core.MAX_SEED));
     this._dropFinalImages(imp);
@@ -1429,7 +1505,7 @@ export class Engine {
       for (const final of imp.finals) {
         for (const [role, combo] of roles) {
           if (this.stopped) break;
-          const name = await this._render(job, settings, combo.style, final.seed);
+          const name = await this._render(job, settings, combo.style, final.seed, mixOf(combo));
           job.done += 1; this.onProgress?.();
           final[role] = name;
           if (same) final.champion = name;

@@ -101,6 +101,7 @@ export async function createBridge() {
       ranges: Object.fromEntries(Object.entries(SETTING_RANGES).map(([k, [, lo, hi]]) => [k, [lo, hi]])) }),
     '/api/free': () => e.freeView(),
     '/api/gacha': () => e.gachaView(),
+    '/api/mixer': () => e.mixerView(),
   };
 
   const post = {
@@ -141,6 +142,8 @@ export async function createBridge() {
     '/api/improve/finish': (b) => ({ result: e.finishImprove(b.choice || 'champion') }),
     '/api/improve/resume': () => e.improveResume(),
     '/api/gacha/save': (b) => e.saveGacha(b.data || {}),
+    '/api/mixer/save': (b) => e.saveMixer(b.data || {}),
+    '/api/generate/mixes': (b) => e.startMixes(b.items || [], b.negApply === 'replace' ? 'replace' : 'merge'),
     '/api/reset': (b) => e.reset(b.scope),
     '/api/update/check': () => updater.check(),
     '/api/update/install': () => updater.install(),

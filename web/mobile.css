@@ -77,6 +77,22 @@ button { touch-action: manipulation; }
 .gresult-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .gresult-actions .tile-check { opacity: 1; position: static; border-color: var(--line-3); background: transparent; width: 26px; height: 26px; }
 .gresult-actions .tile-check.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+/* 프롬프트 섞기 */
+.mixer-source-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.mixer-source { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.mixer-source.off { opacity: 0.55; }
+.mixer-source-main { display: flex; align-items: center; gap: 10px; flex: 1 1 220px; min-width: 0; background: none; border: 0; padding: 0; color: inherit; text-align: left; }
+.mixer-source-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.mixer-source-text .title { font-weight: 700; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; }
+.mixer-source-controls { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.mixer-thumb { width: 48px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; background: var(--surface-3); }
+.mixer-thumb.empty { display: grid; place-items: center; color: var(--text-3); }
+.mixer-editor { max-width: 720px; }
+.mixer-editor .stack { max-height: 62vh; overflow-y: auto; }
+.mixer-block { padding: 10px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.mixer-block.off { opacity: 0.6; }
+.mixer-block .gchips { max-height: 200px; }
+.mixer-neg summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); margin-bottom: 6px; }
 .free-grid { grid-template-columns: minmax(0, 380px) minmax(0, 1fr); }
 .free-form { position: sticky; top: 0; }
 .library-grid { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }

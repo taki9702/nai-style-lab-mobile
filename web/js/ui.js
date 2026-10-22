@@ -814,7 +814,14 @@ export function comboPreview(c, app, onClose = null) {
     h('div', { class: 'card pad-sm' },
       h('div', { class: 'row', style: { marginBottom: '8px', height: '20px' } }, h('span', { class: 'field-label' }, `작가 ${c.pairs.length}명`),
         h('span', { class: 'spacer' }), action('copy', '복사', () => copyText(c.style), false, 'header-action')),
-      weightBars(c.pairs, { min: app.settings.global_min_w, max: app.settings.global_max_w })));
+      weightBars(c.pairs, { min: app.settings.global_min_w, max: app.settings.global_max_w })),
+    // 프롬프트 섞기로 만든 조합: its own quality tags and undesired content, drawn with every picture of it.
+    c.mix_extra || c.mix_negative ? h('div', { class: 'card pad-sm stack', style: { gap: '8px' } },
+      h('div', { class: 'row', style: { height: '20px' } }, h('span', { class: 'field-label' }, '섞은 프롬프트'), h('span', { class: 'spacer' }),
+        action('copy', '전체 복사', () => copyText([c.style, c.mix_extra].filter(Boolean).join(', '), '작가와 품질 태그를 복사했습니다.'), false, 'header-action')),
+      c.mix_extra ? h('div', { class: 'note mono', style: { wordBreak: 'break-word' } }, c.mix_extra) : null,
+      c.mix_negative ? h('details', { class: 'mixer-neg' }, h('summary', {}, '이 조합의 네거티브'),
+        h('div', { class: 'note mono', style: { wordBreak: 'break-word', cursor: 'copy' }, onclick: () => copyText(c.mix_negative, '네거티브를 복사했습니다.') }, c.mix_negative)) : null) : null);
   aside.__onClose = onClose;
   if (onClose && isMobile()) {
     // The sheet takes Android back too, while it is on screen.

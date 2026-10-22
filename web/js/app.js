@@ -5,6 +5,7 @@ import { onBackButton, minimizeApp, styleStatusBar, onPause } from './backend/pl
 import home from './pages/home.js';
 import arena from './pages/arena.js';
 import gacha from './pages/gacha.js';
+import mixer from './pages/mixer.js';
 import evolution from './pages/evolution.js';
 import refine from './pages/refine.js';
 import styles from './pages/styles.js';
@@ -16,6 +17,7 @@ const PAGES = {
   home:      { label: '홈', icon: 'home', page: home },
   arena:     { label: '대결', icon: 'swords', page: arena },
   gacha:     { label: '그림체 뽑기', short: '뽑기', icon: 'dice', page: gacha },
+  mixer:     { label: '프롬프트 섞기', short: '섞기', icon: 'shuffle', page: mixer },
   evolution: { label: '진화', icon: 'dna', page: evolution },
   refine:    { label: '다듬기', icon: 'wand', page: refine },
   styles:    { label: '그림체', icon: 'grid', page: styles },
@@ -25,7 +27,7 @@ const PAGES = {
 };
 const NAV = [
   ['워크플로', ['home', 'arena', 'evolution', 'refine']],
-  ['라이브러리', ['gacha', 'styles', 'library', 'free']],
+  ['라이브러리', ['gacha', 'mixer', 'styles', 'library', 'free']],
   ['', ['settings']],
 ];
 const TABS = ['home', 'arena', 'gacha', 'styles'];
